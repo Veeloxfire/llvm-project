@@ -270,6 +270,10 @@ void StmtProfiler::VisitDefaultStmt(const DefaultStmt *S) {
   VisitStmt(S);
 }
 
+void StmtProfiler::VisitMatchCaseStmt(const MatchCaseStmt *S) {
+  VisitStmt(S);
+}
+
 void StmtProfiler::VisitLabelStmt(const LabelStmt *S) {
   VisitStmt(S);
   VisitDecl(S->getDecl());
@@ -286,6 +290,11 @@ void StmtProfiler::VisitIfStmt(const IfStmt *S) {
 }
 
 void StmtProfiler::VisitSwitchStmt(const SwitchStmt *S) {
+  VisitStmt(S);
+  VisitDecl(S->getConditionVariable());
+}
+
+void StmtProfiler::VisitMatchStmt(const MatchStmt *S) {
   VisitStmt(S);
   VisitDecl(S->getConditionVariable());
 }

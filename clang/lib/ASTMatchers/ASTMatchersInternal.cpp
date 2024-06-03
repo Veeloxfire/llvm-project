@@ -912,9 +912,11 @@ const internal::VariadicDynCastAllOfMatcher<Stmt, GotoStmt> gotoStmt;
 const internal::VariadicDynCastAllOfMatcher<Stmt, LabelStmt> labelStmt;
 const internal::VariadicDynCastAllOfMatcher<Stmt, AddrLabelExpr> addrLabelExpr;
 const internal::VariadicDynCastAllOfMatcher<Stmt, SwitchStmt> switchStmt;
+const internal::VariadicDynCastAllOfMatcher<Stmt, MatchStmt> matchStmt;
 const internal::VariadicDynCastAllOfMatcher<Stmt, SwitchCase> switchCase;
 const internal::VariadicDynCastAllOfMatcher<Stmt, CaseStmt> caseStmt;
 const internal::VariadicDynCastAllOfMatcher<Stmt, DefaultStmt> defaultStmt;
+const internal::VariadicDynCastAllOfMatcher<Stmt, MatchCaseStmt> matchCaseStmt;
 const internal::VariadicDynCastAllOfMatcher<Stmt, CompoundStmt> compoundStmt;
 const internal::VariadicDynCastAllOfMatcher<Stmt, CoroutineBodyStmt>
     coroutineBodyStmt;

@@ -2425,6 +2425,7 @@ DEF_TRAVERSE_STMT(DeclStmt, {
 DEF_TRAVERSE_STMT(BreakStmt, {})
 DEF_TRAVERSE_STMT(CXXTryStmt, {})
 DEF_TRAVERSE_STMT(CaseStmt, {})
+DEF_TRAVERSE_STMT(MatchCaseStmt, {})
 DEF_TRAVERSE_STMT(CompoundStmt, {})
 DEF_TRAVERSE_STMT(ContinueStmt, {})
 DEF_TRAVERSE_STMT(DefaultStmt, {})
@@ -2463,6 +2464,7 @@ DEF_TRAVERSE_STMT(MSDependentExistsStmt, {
 
 DEF_TRAVERSE_STMT(ReturnStmt, {})
 DEF_TRAVERSE_STMT(SwitchStmt, {})
+DEF_TRAVERSE_STMT(MatchStmt, {})
 DEF_TRAVERSE_STMT(WhileStmt, {})
 
 DEF_TRAVERSE_STMT(ConstantExpr, {})

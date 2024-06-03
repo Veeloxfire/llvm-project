@@ -189,6 +189,17 @@ void ASTStmtReader::VisitDefaultStmt(DefaultStmt *S) {
   S->setSubStmt(Record.readSubStmt());
 }
 
+void ASTStmtReader::VisitMatchCaseStmt(MatchCaseStmt *S) {
+  VisitStmt(S);
+  unsigned NumExprs = Record.readInt();
+  MutableArrayRef<Stmt *> Exprs = S->getExprs();
+  assert(Exprs.size() == NumExprs && "MatchCase Exprs size mismatch");
+  for(Stmt *&C: Exprs) {
+    C = Record.readSubExpr();
+  }
+  S->setSubStmt(Record.readSubStmt());
+}
+
 void ASTStmtReader::VisitLabelStmt(LabelStmt *S) {
   VisitStmt(S);
   bool IsSideEntry = Record.readInt();
@@ -271,6 +282,31 @@ void ASTStmtReader::VisitSwitchStmt(SwitchStmt *S) {
       S->setSwitchCaseList(SC);
 
     PrevSC = SC;
+  }
+}
+
+void ASTStmtReader::VisitMatchStmt(MatchStmt *S) {
+  VisitStmt(S);
+
+  bool HasInit = Record.readInt();
+  bool HasVar = Record.readInt();
+  unsigned NumCases = Record.readInt();
+
+  MutableArrayRef<Stmt *> Cases = S->getMatchCases();
+  assert(Cases.size() == NumCases && "Match size mismatch");
+
+  S->setCond(Record.readSubExpr());
+  if (HasInit)
+    S->setInit(Record.readSubStmt());
+  if (HasVar)
+    S->setConditionVariableDeclStmt(cast<DeclStmt>(Record.readSubStmt()));
+
+  S->setMatchLoc(readSourceLocation());
+  S->setLParenLoc(readSourceLocation());
+  S->setRParenLoc(readSourceLocation());
+
+  for(Stmt *&C: Cases) {
+    C = Record.readSubStmt();
   }
 }
 
@@ -2928,6 +2964,12 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
       S = new (Context) DefaultStmt(Empty);
       break;
 
+    case STMT_MATCH_CASE:
+      S = MatchCaseStmt::CreateEmpty(
+          Context,
+          /*NumExprs*/ Record[ASTStmtReader::NumStmtFields]);
+      break;
+
     case STMT_LABEL:
       S = new (Context) LabelStmt(Empty);
       break;
@@ -2952,6 +2994,14 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
           Context,
           /* HasInit=*/Record[ASTStmtReader::NumStmtFields],
           /* HasVar=*/Record[ASTStmtReader::NumStmtFields + 1]);
+      break;
+
+    case STMT_MATCH:
+      S = MatchStmt::CreateEmpty(
+          Context,
+          /* HasInit=*/Record[ASTStmtReader::NumStmtFields],
+          /* HasVar=*/Record[ASTStmtReader::NumStmtFields + 1],
+          /* NumCases=*/Record[ASTStmtReader::NumStmtFields + 2]);
       break;
 
     case STMT_WHILE:

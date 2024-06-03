@@ -8451,10 +8451,13 @@ public:
   sema::CompoundScopeInfo &getCurCompoundScope() const;
 
   ExprResult ActOnCaseExpr(SourceLocation CaseLoc, ExprResult Val);
+  ExprResult ActOnMatchCaseExpr(ExprResult Val);
   StmtResult ActOnCaseStmt(SourceLocation CaseLoc, ExprResult LHS,
                            SourceLocation DotDotDotLoc, ExprResult RHS,
                            SourceLocation ColonLoc);
   void ActOnCaseStmtBody(Stmt *CaseStmt, Stmt *SubStmt);
+
+  StmtResult ActOnMatchCaseStmt(ArrayRef<Stmt *> Exprs, Stmt *SubStmt);
 
   StmtResult ActOnDefaultStmt(SourceLocation DefaultLoc,
                               SourceLocation ColonLoc, Stmt *SubStmt,
@@ -8490,6 +8493,13 @@ public:
                                     SourceLocation RParenLoc);
   StmtResult ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
                                    Stmt *Body);
+
+  ConditionResult ActOnStartOfMatchStmt(ConditionResult Cond);
+  StmtResult ActOnFinishMatchStmt(SourceLocation MatchLoc,
+                                  SourceLocation LParenLoc, Stmt *InitStmt,
+                                  ConditionResult Cond,
+                                  SourceLocation RParenLoc,
+                                  ArrayRef<Stmt *> Cases);
 
   /// DiagnoseAssignmentEnum - Warn if assignment to enum is a constant
   /// integer not in the range of enum values.

@@ -1846,6 +1846,7 @@ public:
   ExprResult ParseConstantExpression();
   ExprResult ParseArrayBoundExpression();
   ExprResult ParseCaseExpression(SourceLocation CaseLoc);
+  ExprResult ParseMatchCaseExpression();
   ExprResult ParseConstraintExpression();
   ExprResult
   ParseConstraintLogicalAndExpression(bool IsTrailingRequiresClause);
@@ -2175,6 +2176,7 @@ private:
                                 bool MissingCase = false,
                                 ExprResult Expr = ExprResult());
   StmtResult ParseDefaultStatement(ParsedStmtContext StmtCtx);
+  StmtResult ParseMatchCaseStatement();
   StmtResult ParseCompoundStatement(bool isStmtExpr = false);
   StmtResult ParseCompoundStatement(bool isStmtExpr,
                                     unsigned ScopeFlags);
@@ -2189,6 +2191,7 @@ private:
                                  SourceLocation &RParenLoc);
   StmtResult ParseIfStatement(SourceLocation *TrailingElseLoc);
   StmtResult ParseSwitchStatement(SourceLocation *TrailingElseLoc);
+  StmtResult ParseMatchStatement();
   StmtResult ParseWhileStatement(SourceLocation *TrailingElseLoc);
   StmtResult ParseDoStatement();
   StmtResult ParseForStatement(SourceLocation *TrailingElseLoc);

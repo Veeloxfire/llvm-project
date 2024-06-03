@@ -257,6 +257,14 @@ ExprResult Parser::ParseCaseExpression(SourceLocation CaseLoc) {
   return Actions.ActOnCaseExpr(CaseLoc, Res);
 }
 
+ExprResult Parser::ParseMatchCaseExpression() {
+  EnterExpressionEvaluationContext ConstantEvaluated(
+      Actions, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+  ExprResult LHS(ParseCastExpression(AnyCastExpr, false, NotTypeCast));
+  ExprResult Res(ParseRHSOfBinaryExpression(LHS, prec::Conditional));
+  return Actions.ActOnMatchCaseExpr(Res);
+}
+
 /// Parse a constraint-expression.
 ///
 /// \verbatim

@@ -178,6 +178,17 @@ void ASTStmtWriter::VisitDefaultStmt(DefaultStmt *S) {
   Code = serialization::STMT_DEFAULT;
 }
 
+void ASTStmtWriter::VisitMatchCaseStmt(MatchCaseStmt *S) {
+  VisitStmt(S);
+  const ArrayRef<Stmt *> Exprs = S->getExprs();
+  Record.push_back(static_cast<unsigned>(Exprs.size()));
+  for(Stmt *C: Exprs) {
+    Record.AddStmt(C);
+  }
+  Record.AddStmt(S->getSubStmt());
+  Code = serialization::STMT_MATCH_CASE;
+}
+
 void ASTStmtWriter::VisitLabelStmt(LabelStmt *S) {
   VisitStmt(S);
   Record.push_back(S->isSideEntry());
@@ -251,6 +262,33 @@ void ASTStmtWriter::VisitSwitchStmt(SwitchStmt *S) {
        SC = SC->getNextSwitchCase())
     Record.push_back(Writer.RecordSwitchCaseID(SC));
   Code = serialization::STMT_SWITCH;
+}
+
+void ASTStmtWriter::VisitMatchStmt(MatchStmt *S) {
+  VisitStmt(S);
+
+  bool HasInit = S->hasInitStorage();
+  bool HasVar = S->hasVarStorage();
+  const ArrayRef<Stmt *> Cases = S->getMatchCases();
+
+  Record.push_back(HasInit);
+  Record.push_back(HasVar);
+  Record.push_back(static_cast<unsigned>(Cases.size()));
+
+  Record.AddStmt(S->getCond());
+  if (HasInit)
+    Record.AddStmt(S->getInit());
+  if (HasVar)
+    Record.AddStmt(S->getConditionVariableDeclStmt());
+
+  Record.AddSourceLocation(S->getMatchLoc());
+  Record.AddSourceLocation(S->getLParenLoc());
+  Record.AddSourceLocation(S->getRParenLoc());
+
+  for(Stmt *C: Cases) {
+    Record.AddStmt(C);
+  }
+  Code = serialization::STMT_MATCH;
 }
 
 void ASTStmtWriter::VisitWhileStmt(WhileStmt *S) {

@@ -11,6 +11,7 @@ def NullStmt : StmtNode<Stmt>;
 def CompoundStmt : StmtNode<Stmt>;
 def IfStmt : StmtNode<Stmt>;
 def SwitchStmt : StmtNode<Stmt>;
+def MatchStmt : StmtNode<Stmt>;
 def WhileStmt : StmtNode<Stmt>;
 def DoStmt : StmtNode<Stmt>;
 def ForStmt : StmtNode<Stmt>;
@@ -23,6 +24,7 @@ def DeclStmt  : StmtNode<Stmt>;
 def SwitchCase : StmtNode<Stmt, 1>;
 def CaseStmt : StmtNode<SwitchCase>;
 def DefaultStmt : StmtNode<SwitchCase>;
+def MatchCaseStmt : StmtNode<Stmt>;
 def CapturedStmt : StmtNode<Stmt>;
 
 // Statements that might produce a value (for example, as the last non-null

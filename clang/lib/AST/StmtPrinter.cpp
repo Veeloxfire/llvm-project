@@ -286,6 +286,17 @@ void StmtPrinter::VisitDefaultStmt(DefaultStmt *Node) {
   PrintStmt(Node->getSubStmt(), 0);
 }
 
+void StmtPrinter::VisitMatchCaseStmt(MatchCaseStmt *Node) {
+  for(Stmt *C: Node->getExprs()) {
+    Expr *CaseExpr = cast<Expr>(C);
+    Indent(-1) << "case ";
+    PrintExpr(CaseExpr);
+    OS << ":" << NL;
+  }
+
+  PrintStmt(Node->getSubStmt(), 0);
+}
+
 void StmtPrinter::VisitLabelStmt(LabelStmt *Node) {
   Indent(-1) << Node->getName() << ":" << NL;
   PrintStmt(Node->getSubStmt(), 0);
@@ -370,6 +381,22 @@ void StmtPrinter::VisitSwitchStmt(SwitchStmt *Node) {
     PrintExpr(Node->getCond());
   OS << ")";
   PrintControlledStmt(Node->getBody());
+}
+
+void StmtPrinter::VisitMatchStmt(MatchStmt *Node) {
+  Indent() << "match (";
+  if (Node->getInit())
+    PrintInitStmt(Node->getInit(), 8);
+  if (const DeclStmt *DS = Node->getConditionVariableDeclStmt())
+    PrintRawDeclStmt(DS);
+  else
+    PrintExpr(Node->getCond());
+  OS << ") {" << NL;
+  Indent();
+  for(Stmt *C: Node->getMatchCases()) {
+    PrintStmt(C);
+  }
+  Indent() << "}";
 }
 
 void StmtPrinter::VisitWhileStmt(WhileStmt *Node) {

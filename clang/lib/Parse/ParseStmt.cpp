@@ -312,6 +312,8 @@ Retry:
     return ParseIfStatement(TrailingElseLoc);
   case tok::kw_switch:              // C99 6.8.4.2: switch-statement
     return ParseSwitchStatement(TrailingElseLoc);
+  case tok::kw_match:
+    return ParseMatchStatement();
 
   case tok::kw_while:               // C99 6.8.5.1: while-statement
     return ParseWhileStatement(TrailingElseLoc);
@@ -1798,6 +1800,136 @@ StmtResult Parser::ParseSwitchStatement(SourceLocation *TrailingElseLoc) {
   SwitchScope.Exit();
 
   return Actions.ActOnFinishSwitchStmt(SwitchLoc, Switch.get(), Body.get());
+}
+
+/// ParseMatchStatement
+///       match-statement:
+///        'match' '(' condition ')' '{' match-case-list '}'
+///       
+///       match-case-list:
+///         match-case-statment match-case-list[opt]
+///
+StmtResult Parser::ParseMatchStatement() {
+  assert(Tok.is(tok::kw_match) && "Not a match stmt!");
+  SourceLocation MatchLoc = ConsumeToken();  // eat the 'match'.
+
+  if (Tok.isNot(tok::l_paren)) {
+    Diag(Tok, diag::err_expected_lparen_after) << "match";
+    SkipUntil(tok::semi);
+    return StmtError();
+  }
+
+  assert(getLangOpts().CPlusPlus && "Only a c++");
+
+  // Parse the condition.
+  StmtResult InitStmt;
+  Sema::ConditionResult Cond;
+  SourceLocation LParen;
+  SourceLocation RParen;
+  if (ParseParenExprOrCondition(&InitStmt, Cond, MatchLoc,
+                                Sema::ConditionKind::Switch, LParen, RParen))
+    return StmtError();
+
+  Cond = Actions.ActOnStartOfMatchStmt(Cond);
+
+  StmtVector Stmts;
+  {
+    if (Tok.isNot(tok::l_brace)) {
+      Diag(Tok, diag::err_expected_lbrace_after) << "'match' condition";
+      SkipUntil(tok::semi);
+      return StmtError();
+    }
+
+    BalancedDelimiterTracker T(*this, tok::l_brace);
+    if (T.consumeOpen())
+      return StmtError();
+
+
+    while (Tok.isNot(tok::r_brace) && Tok.isNot(tok::eof)) {
+      if(Tok.isNot(tok::kw_case)) {
+        // FIXME: error reporting
+        return StmtError(); 
+      }
+
+      StmtResult R = ParseMatchCaseStatement();
+      if(R.isUsable())
+        Stmts.push_back(R.get());
+    }
+
+    if (T.consumeClose())
+      return StmtError();
+  }
+
+  return Actions.ActOnFinishMatchStmt(MatchLoc, LParen, InitStmt.get(), Cond, RParen, ArrayRef(Stmts));
+}
+
+/// ParseMatchCaseStatement
+///       match-case-statement:
+///        match-case-expressions statement
+///       
+///       match-case-expressions:
+///         'case' expression ':' match-case-expressions[opt]
+///
+StmtResult Parser::ParseMatchCaseStatement() {
+  assert(Tok.is(tok::kw_case) && "Not a case stmt!");
+
+  StmtVector Cases;
+  do {
+    SourceLocation CaseLoc = ConsumeToken();
+    SourceLocation ColonLoc = SourceLocation();
+
+    if (Tok.is(tok::code_completion)) {
+      cutOffParsing();
+      Actions.CodeCompletion().CodeCompleteCase(getCurScope());
+      return StmtError();
+    }
+
+    /// We don't want to treat 'case x : y' as a potential typo for 'case x::y'.
+    /// Disable this form of error recovery while we're parsing the case
+    /// expression.
+    ColonProtectionRAIIObject ColonProtection(*this);
+
+    ExprResult LHS = ParseCaseExpression(CaseLoc);
+    if (LHS.isInvalid()) {
+      // If constant-expression is parsed unsuccessfully, recover by skipping
+      // current case statement (moving to the colon that ends it).
+      if (!SkipUntil(tok::colon, tok::r_brace, StopAtSemi | StopBeforeMatch))
+        return StmtError();
+    }
+
+    ColonProtection.restore();
+
+    if (TryConsumeToken(tok::colon, ColonLoc)) {
+    } else if (TryConsumeToken(tok::semi, ColonLoc) ||
+               TryConsumeToken(tok::coloncolon, ColonLoc)) {
+      // Treat "case blah;" or "case blah::" as a typo for "case blah:".
+      Diag(ColonLoc, diag::err_expected_after)
+          << "'case'" << tok::colon
+          << FixItHint::CreateReplacement(ColonLoc, ":");
+    } else {
+      SourceLocation ExpectedLoc = PP.getLocForEndOfToken(PrevTokLocation);
+      Diag(ExpectedLoc, diag::err_expected_after)
+          << "'case'" << tok::colon
+          << FixItHint::CreateInsertion(ExpectedLoc, ":");
+      ColonLoc = ExpectedLoc;
+    }
+
+    Cases.push_back(LHS.get());
+
+  } while (Tok.is(tok::kw_case));
+
+  // Expect we found a non-case statement, start by parsing it.
+
+  if (Tok.is(tok::r_brace)) {
+    // "match (X) { case 4: }", is invalid unlike switch
+    DiagnoseLabelAtEndOfCompoundStatement();
+    return StmtError();
+  }
+
+  StmtResult SubStmt = ParseStatement(/*TrailingElseLoc=*/nullptr);
+
+  // Return the top level parsed statement tree.
+  return Actions.ActOnMatchCaseStmt(ArrayRef(Cases), SubStmt.get());;
 }
 
 /// ParseWhileStatement

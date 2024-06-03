@@ -101,6 +101,7 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
   case Stmt::SEHExceptStmtClass:
   case Stmt::SEHFinallyStmtClass:
   case Stmt::MSDependentExistsStmtClass:
+  case Stmt::MatchCaseStmtClass:
     llvm_unreachable("invalid statement class to emit generically");
   case Stmt::NullStmtClass:
   case Stmt::CompoundStmtClass:
@@ -160,6 +161,7 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
   case Stmt::ReturnStmtClass:  EmitReturnStmt(cast<ReturnStmt>(*S));      break;
 
   case Stmt::SwitchStmtClass:  EmitSwitchStmt(cast<SwitchStmt>(*S));      break;
+  case Stmt::MatchStmtClass:  EmitMatchStmt(cast<MatchStmt>(*S));      break;
   case Stmt::GCCAsmStmtClass:  // Intentional fall-through.
   case Stmt::MSAsmStmtClass:   EmitAsmStmt(cast<AsmStmt>(*S));            break;
   case Stmt::CoroutineBodyStmtClass:
@@ -2270,6 +2272,167 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   SwitchWeights = SavedSwitchWeights;
   SwitchLikelihood = SavedSwitchLikelihood;
   CaseRangeBlock = SavedCRBlock;
+}
+
+void CodeGenFunction::EmitMatchCaseStmt(const MatchCaseStmt &S,
+                                        llvm::SwitchInst& MatchInsn,
+                                        JumpDest ExitDest) {
+  ArrayRef<Stmt *> Exprs = S.getExprs();
+
+  auto EI = Exprs.begin();
+  const auto EE = Exprs.end();
+
+  assert(Exprs.size() >= 1 && "all match cases should have 1 case");
+  Expr *CaseExprFirst = cast<Expr>(*EI);
+  ++EI;
+
+  llvm::ConstantInt *CaseVal =
+    Builder.getInt(CaseExprFirst->EvaluateKnownConstInt(getContext()));
+
+  // Emit debuginfo for the case value if it is an enum value.
+  const ConstantExpr *CE;
+  if (auto ICE = dyn_cast<ImplicitCastExpr>(CaseExprFirst))
+    CE = dyn_cast<ConstantExpr>(ICE->getSubExpr());
+  else
+    CE = dyn_cast<ConstantExpr>(CaseExprFirst);
+  if (CE) {
+    if (auto DE = dyn_cast<DeclRefExpr>(CE->getSubExpr()))
+      if (CGDebugInfo *Dbg = getDebugInfo())
+        if (CGM.getCodeGenOpts().hasReducedDebugInfo())
+          Dbg->EmitGlobalVariable(DE->getDecl(),
+              APValue(llvm::APSInt(CaseVal->getValue())));
+  } 
+
+  llvm::BasicBlock *CaseDest = createBasicBlock("ma.bb");
+  MatchInsn.addCase(CaseVal, CaseDest);
+  
+  EmitBlock(CaseDest);
+
+  // If this code is reachable then emit a stop point (if generating
+  // debug info). We have to do this ourselves because we are on the
+  // "simple" statement path.
+  if (HaveInsertPoint())
+    EmitStopPoint(&S);
+
+
+  // iteratively add consecutive cases to this match stmt.
+  for (; EI < EE; ++EI) {
+    Expr *CaseExprCur = cast<Expr>(*EI);
+    llvm::ConstantInt *CaseVal =
+      Builder.getInt(CaseExprCur->EvaluateKnownConstInt(getContext()));
+    
+    MatchInsn.addCase(CaseVal, CaseDest);
+  }
+
+  RunCleanupsScope CaseScope(*this);
+  EmitStmt(S.getSubStmt());
+  CaseScope.ForceCleanup();
+
+  EmitBranchThroughCleanup(ExitDest);
+}
+
+static bool FindMatchCaseStatementForValue(const MatchStmt &S, const llvm::APSInt& ConstantCondValue, ASTContext &C, const MatchCaseStmt *& OutCase) {
+  for(Stmt *Case: S.getMatchCases()) {
+    const MatchCaseStmt* MC = cast<MatchCaseStmt>(Case);
+    for(Stmt *E: MC->getExprs()) {
+      const Expr* CaseExpr = cast<Expr>(E);
+      if(CaseExpr->EvaluateKnownConstInt(C) == ConstantCondValue) {
+        OutCase = MC;
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+void CodeGenFunction::EmitMatchStmt(const MatchStmt &S) {
+  // See if we can constant fold the condition of the switch and therefore only
+  // emit the live case statement (if any) of the switch.
+  llvm::APSInt ConstantCondValue;
+  if (ConstantFoldsToSimpleInteger(S.getCond(), ConstantCondValue)) {
+    const MatchCaseStmt *Case = nullptr;
+
+    if (FindMatchCaseStatementForValue(S, ConstantCondValue, getContext(), Case)) {
+      RunCleanupsScope ExecutedScope(*this);
+
+      if (S.getInit())
+        EmitStmt(S.getInit());
+
+      // Emit the condition variable if needed inside the entire cleanup scope
+      // used by this special case for constant folded switches.
+      if (S.getConditionVariable())
+        EmitDecl(*S.getConditionVariable());
+
+      // Okay, we can dead code eliminate everything except this case.  Emit the
+      // specified series of statements and we're good.
+      EmitStmt(Case->getSubStmt());
+      incrementProfileCounter(&S);
+
+      return;
+    }
+  }
+
+  JumpDest MatchExit = getJumpDestInCurrentScope("ma.epilog");
+
+  RunCleanupsScope ConditionScope(*this);
+
+  if (S.getInit())
+    EmitStmt(S.getInit());
+
+  if (S.getConditionVariable())
+    EmitDecl(*S.getConditionVariable());
+  llvm::Value *CondV = EmitScalarExpr(S.getCond());
+
+  // Create basic block to hold stuff that comes after match
+  // statement.
+  llvm::BasicBlock *DefaultBlock = createBasicBlock("ma.default");
+  llvm::SwitchInst *MatchInsn = Builder.CreateSwitch(CondV, DefaultBlock);
+
+  // Clear the insertion point to indicate we are in unreachable code.
+  Builder.ClearInsertionPoint();
+
+  // Emit match body.
+  for(const Stmt *rawC: S.getMatchCases()) {
+    const MatchCaseStmt* MC = cast<MatchCaseStmt>(rawC);
+
+    EmitMatchCaseStmt(*MC, *MatchInsn, MatchExit);
+  }
+
+  ConditionScope.ForceCleanup();
+
+  MatchInsn->setDefaultDest(DefaultBlock);
+
+  // If a default was never emitted:
+  if (!DefaultBlock->getParent()) {
+    // If we have cleanups, emit the default block so that there's a
+    // place to jump through the cleanups from.
+    if (ConditionScope.requiresCleanups()) {
+      EmitBlock(DefaultBlock);
+
+    // Otherwise, just forward the default block to the switch end.
+    } else {
+      DefaultBlock->replaceAllUsesWith(MatchExit.getBlock());
+      delete DefaultBlock;
+    }
+  }
+
+  // Emit continuation.
+  EmitBlock(MatchExit.getBlock(), true);
+  incrementProfileCounter(&S);
+
+  // If the switch has a condition wrapped by __builtin_unpredictable,
+  // create metadata that specifies that the switch is unpredictable.
+  // Don't bother if not optimizing because that metadata would not be used.
+  auto *Call = dyn_cast<CallExpr>(S.getCond());
+  if (Call && CGM.getCodeGenOpts().OptimizationLevel != 0) {
+    auto *FD = dyn_cast_or_null<FunctionDecl>(Call->getCalleeDecl());
+    if (FD && FD->getBuiltinID() == Builtin::BI__builtin_unpredictable) {
+      llvm::MDBuilder MDHelper(getLLVMContext());
+      MatchInsn->setMetadata(llvm::LLVMContext::MD_unpredictable,
+                              MDHelper.createUnpredictable());
+    }
+  }
 }
 
 static std::string

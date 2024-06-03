@@ -1118,6 +1118,87 @@ void SwitchStmt::setConditionVariable(const ASTContext &Ctx, VarDecl *V) {
       DeclStmt(DeclGroupRef(V), VarRange.getBegin(), VarRange.getEnd());
 }
 
+MatchStmt::MatchStmt(const ASTContext &Ctx, SourceLocation MatchLoc,
+                     Stmt *Init, VarDecl *Var,
+                     Expr *Cond, SourceLocation LParenLoc,
+                     SourceLocation RParenLoc, ArrayRef<Stmt *> Cases)
+    : Stmt(MatchStmtClass), LParenLoc(LParenLoc),
+      RParenLoc(RParenLoc), NumCases(Cases.size()) {
+  bool HasInit = Init != nullptr;
+  bool HasVar = Var != nullptr;
+  MatchStmtBits.HasInit = HasInit;
+  MatchStmtBits.HasVar = HasVar;
+
+  setMatchLoc(MatchLoc);
+
+  setCond(Cond);
+  if (HasInit)
+    setInit(Init);
+  if (HasVar)
+    setConditionVariable(Ctx, Var);
+
+  MutableArrayRef<Stmt *> SelfCases = getMatchCases();
+
+  auto SI = SelfCases.begin();
+  const auto SE = SelfCases.end();
+
+  auto CI = Cases.begin();
+  const auto CE = Cases.end();
+
+  for(; SI < SE && CI < CE; ++SI, ++CI) {
+    *SI = *CI;
+  }
+
+  assert(CI == CE && SI == SE);
+}
+
+MatchStmt::MatchStmt(EmptyShell Empty, bool HasInit, bool HasVar, unsigned NumCases)
+    : Stmt(MatchStmtClass, Empty), NumCases(NumCases) {
+  MatchStmtBits.HasInit = HasInit;
+  MatchStmtBits.HasVar = HasVar;
+}
+
+MatchStmt *MatchStmt::Create(const ASTContext &Ctx, SourceLocation MatchLoc,
+                             Stmt *Init, VarDecl *Var,
+                             Expr *Cond, SourceLocation LParenLoc,
+                             SourceLocation RParenLoc, ArrayRef<Stmt *> Cases) {
+  bool HasInit = Init != nullptr;
+  bool HasVar = Var != nullptr;
+  void *Mem = Ctx.Allocate(
+      totalSizeToAlloc<Stmt *>(NumMandatoryStmtPtr + HasInit + HasVar + Cases.size()),
+      alignof(MatchStmt));
+  return new (Mem) MatchStmt(Ctx, MatchLoc, Init, Var, Cond, LParenLoc, RParenLoc, Cases);
+}
+
+MatchStmt *MatchStmt::CreateEmpty(const ASTContext &Ctx, bool HasInit,
+                                  bool HasVar, unsigned NumCases) {
+  void *Mem = Ctx.Allocate(
+      totalSizeToAlloc<Stmt *>(NumMandatoryStmtPtr + HasInit + HasVar + NumCases),
+      alignof(MatchStmt));
+  return new (Mem) MatchStmt(EmptyShell(), HasInit, HasVar, NumCases);
+}
+
+VarDecl *MatchStmt::getConditionVariable() {
+  auto *DS = getConditionVariableDeclStmt();
+  if (!DS)
+    return nullptr;
+  return cast<VarDecl>(DS->getSingleDecl());
+}
+
+void MatchStmt::setConditionVariable(const ASTContext &Ctx, VarDecl *V) {
+  assert(hasVarStorage() &&
+         "This match statement has no storage for a condition variable!");
+
+  if (!V) {
+    getTrailingObjects<Stmt *>()[varOffset()] = nullptr;
+    return;
+  }
+
+  SourceRange VarRange = V->getSourceRange();
+  getTrailingObjects<Stmt *>()[varOffset()] = new (Ctx)
+      DeclStmt(DeclGroupRef(V), VarRange.getBegin(), VarRange.getEnd());
+}
+
 WhileStmt::WhileStmt(const ASTContext &Ctx, VarDecl *Var, Expr *Cond,
                      Stmt *Body, SourceLocation WL, SourceLocation LParenLoc,
                      SourceLocation RParenLoc)
@@ -1235,6 +1316,34 @@ CaseStmt *CaseStmt::CreateEmpty(const ASTContext &Ctx,
           NumMandatoryStmtPtr + CaseStmtIsGNURange, CaseStmtIsGNURange),
       alignof(CaseStmt));
   return new (Mem) CaseStmt(EmptyShell(), CaseStmtIsGNURange);
+}
+
+MatchCaseStmt::MatchCaseStmt(ArrayRef<Stmt *> CaseExprs, Stmt *SubStmt)
+  : Stmt(MatchCaseStmtClass), NumExprs(CaseExprs.size()) {
+  
+  Stmt **stmts = getTrailingObjects<Stmt *>();
+  for(Stmt *C: CaseExprs) {
+    *stmts = C;
+    ++stmts;
+  }
+
+  *stmts = SubStmt;
+}
+
+MatchCaseStmt *MatchCaseStmt::Create(const ASTContext &Ctx,
+                                     ArrayRef<Stmt *> CaseExprs, Stmt *SubStmt) {
+  void *Mem = Ctx.Allocate(
+      totalSizeToAlloc<Stmt *>(CaseExprs.size() + SubStmtCount),
+      alignof(MatchCaseStmt));
+  return new (Mem) MatchCaseStmt(CaseExprs, SubStmt);
+}
+
+MatchCaseStmt *MatchCaseStmt::CreateEmpty(const ASTContext &Ctx,
+                                          unsigned NumCaseExprs) {
+  void *Mem = Ctx.Allocate(
+      totalSizeToAlloc<Stmt *>(NumCaseExprs + SubStmtCount),
+      alignof(CaseStmt));
+  return new (Mem) MatchCaseStmt(EmptyShell(), NumCaseExprs);
 }
 
 SEHTryStmt::SEHTryStmt(bool IsCXXTry, SourceLocation TryLoc, Stmt *TryBlock,

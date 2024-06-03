@@ -10239,6 +10239,12 @@ def warn_missing_case : Warning<"%plural{"
 def warn_switch_default : Warning<"'switch' missing 'default' label">,
   InGroup<SwitchDefault>, DefaultIgnore;
 
+def error_missing_match_case : Error<"%plural{"
+  "1:enumeration value %1 not handled in match|"
+  "2:enumeration values %1 and %2 not handled in match|"
+  "3:enumeration values %1, %2, and %3 not handled in match|"
+  ":%0 enumeration values not handled in match: %1, %2, %3...}0">;
+
 def warn_unannotated_fallthrough : Warning<
   "unannotated fall-through between switch labels">,
   InGroup<ImplicitFallthrough>, DefaultIgnore;

@@ -1849,6 +1849,8 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::LabelStmtClass:
     case Stmt::NoStmtClass:
     case Stmt::NullStmtClass:
+    case Stmt::MatchCaseStmtClass:
+    case Stmt::MatchStmtClass:
     case Stmt::SwitchStmtClass:
     case Stmt::WhileStmtClass:
     case Expr::MSDependentExistsStmtClass:

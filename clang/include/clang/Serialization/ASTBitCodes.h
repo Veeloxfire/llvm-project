@@ -1483,6 +1483,9 @@ enum StmtCode {
 
   /// A DefaultStmt record.
   STMT_DEFAULT,
+  
+  /// A MatchCaseStmt record.
+  STMT_MATCH_CASE,
 
   /// A LabelStmt record.
   STMT_LABEL,
@@ -1495,6 +1498,9 @@ enum StmtCode {
 
   /// A SwitchStmt record.
   STMT_SWITCH,
+  
+  /// A MatchStmt record.
+  STMT_MATCH,
 
   /// A WhileStmt record.
   STMT_WHILE,
