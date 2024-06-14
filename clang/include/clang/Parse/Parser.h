@@ -1846,7 +1846,7 @@ public:
   ExprResult ParseConstantExpression();
   ExprResult ParseArrayBoundExpression();
   ExprResult ParseCaseExpression(SourceLocation CaseLoc);
-  ExprResult ParseMatchCaseExpression();
+  bool ParseMatchCaseExpressions(SmallVectorImpl<Stmt *> &Exprs);
   ExprResult ParseConstraintExpression();
   ExprResult
   ParseConstraintLogicalAndExpression(bool IsTrailingRequiresClause);
@@ -2176,7 +2176,7 @@ private:
                                 bool MissingCase = false,
                                 ExprResult Expr = ExprResult());
   StmtResult ParseDefaultStatement(ParsedStmtContext StmtCtx);
-  StmtResult ParseMatchCaseStatement();
+  StmtResult ParseMatchCaseStatement(unsigned ExprCount);
   StmtResult ParseCompoundStatement(bool isStmtExpr = false);
   StmtResult ParseCompoundStatement(bool isStmtExpr,
                                     unsigned ScopeFlags);

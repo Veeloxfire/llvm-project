@@ -1486,6 +1486,9 @@ enum StmtCode {
   
   /// A MatchCaseStmt record.
   STMT_MATCH_CASE,
+  
+  /// A MatchDefaultStmt record.
+  STMT_MATCH_DEFAULT,
 
   /// A LabelStmt record.
   STMT_LABEL,

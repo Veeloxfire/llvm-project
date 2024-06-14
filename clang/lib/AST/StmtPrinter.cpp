@@ -287,14 +287,34 @@ void StmtPrinter::VisitDefaultStmt(DefaultStmt *Node) {
 }
 
 void StmtPrinter::VisitMatchCaseStmt(MatchCaseStmt *Node) {
-  for(Stmt *C: Node->getExprs()) {
-    Expr *CaseExpr = cast<Expr>(C);
+  for(ArrayRef<Stmt *> CH: Node->getChunkedExprs()) {
     Indent(-1) << "case ";
-    PrintExpr(CaseExpr);
-    OS << ":" << NL;
+    auto I = CH.begin();
+    const auto E = CH.end();
+
+    assert(I < E);
+    if (MatchDefaultStmt *D = dyn_cast<MatchDefaultStmt>(*I)) {
+      PrintStmt(D);
+    }
+    else {
+      Expr *CaseExpr = cast<Expr>(*I);
+      PrintExpr(CaseExpr);
+      ++I;
+
+      for(; I < E; ++I) {
+        OS << ", ";
+        Expr *CaseExpr = cast<Expr>(*I);
+        PrintExpr(CaseExpr);
+      }
+      OS << ":" << NL;
+    }
   }
 
   PrintStmt(Node->getSubStmt(), 0);
+}
+
+void StmtPrinter::VisitMatchDefaultStmt(MatchDefaultStmt *Node) {
+  OS << "default" << NL;
 }
 
 void StmtPrinter::VisitLabelStmt(LabelStmt *Node) {
@@ -385,12 +405,20 @@ void StmtPrinter::VisitSwitchStmt(SwitchStmt *Node) {
 
 void StmtPrinter::VisitMatchStmt(MatchStmt *Node) {
   Indent() << "match (";
-  if (Node->getInit())
-    PrintInitStmt(Node->getInit(), 8);
-  if (const DeclStmt *DS = Node->getConditionVariableDeclStmt())
-    PrintRawDeclStmt(DS);
-  else
-    PrintExpr(Node->getCond());
+  
+  {
+    const auto Conds = Node->getConds();
+    auto I = Conds.begin();
+    const auto E = Conds.end();
+
+    OS << *I;
+    ++I;
+
+    for(; I < E; ++I) {
+      OS << ", " << *I;
+    }
+  }
+
   OS << ") {" << NL;
   Indent();
   for(Stmt *C: Node->getMatchCases()) {

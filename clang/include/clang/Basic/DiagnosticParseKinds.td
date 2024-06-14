@@ -259,6 +259,8 @@ def err_expected_lbrace_in_compound_literal : Error<
   "expected '{' in compound literal">;
 def err_expected_while : Error<"expected 'while' in do/while loop">;
 
+def err_unmatched_match_count : Error<"found %0 arguments in match 'case', but expected %1">;
+
 def err_expected_semi_after_stmt : Error<"expected ';' after %0 statement">;
 def err_expected_semi_after_expr : Error<"expected ';' after expression">;
 def err_extraneous_token_before_semi : Error<"extraneous '%0' before ';'">;

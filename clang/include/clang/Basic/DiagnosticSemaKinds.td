@@ -10217,6 +10217,13 @@ def err_duplicate_case_differing_expr : Error<
 def warn_case_empty_range : Warning<"empty case range specified">;
 def warn_missing_case_for_condition :
   Warning<"no case matching constant switch condition '%0'">;
+
+def warn_missing_case_for_match_condition : Warning<"%plural{"
+  "1:no case matching constant match condition '%1'|"
+  "2:no case matching constant match %0 conditions ('%1', '%2')|"
+  "3:no case matching constant match %0 conditions ('%1', '%2', '%3')|"
+  ":cases matching constant match %0 conditions ('%1', '%2', '%3', ...)}0">;
+
 def err_loop_attr_conflict : Error<
   "conflicting loop attribute %0">;
 def err_attribute_power_of_two_in_range : Error<
@@ -10239,11 +10246,13 @@ def warn_missing_case : Warning<"%plural{"
 def warn_switch_default : Warning<"'switch' missing 'default' label">,
   InGroup<SwitchDefault>, DefaultIgnore;
 
-def error_missing_match_case : Error<"%plural{"
+def warn_missing_match_case : Warning<"%plural{"
   "1:enumeration value %1 not handled in match|"
   "2:enumeration values %1 and %2 not handled in match|"
   "3:enumeration values %1, %2, and %3 not handled in match|"
   ":%0 enumeration values not handled in match: %1, %2, %3...}0">;
+
+def error_missing_match_default : Error<"missing 'default' in 'match' (This is automatic error, as its generally infeasable you matched all the cases)">;
 
 def warn_unannotated_fallthrough : Warning<
   "unannotated fall-through between switch labels">,

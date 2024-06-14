@@ -102,6 +102,7 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
   case Stmt::SEHFinallyStmtClass:
   case Stmt::MSDependentExistsStmtClass:
   case Stmt::MatchCaseStmtClass:
+  case Stmt::MatchDefaultStmtClass:
     llvm_unreachable("invalid statement class to emit generically");
   case Stmt::NullStmtClass:
   case Stmt::CompoundStmtClass:
@@ -2274,79 +2275,206 @@ void CodeGenFunction::EmitSwitchStmt(const SwitchStmt &S) {
   CaseRangeBlock = SavedCRBlock;
 }
 
-void CodeGenFunction::EmitMatchCaseStmt(const MatchCaseStmt &S,
-                                        llvm::SwitchInst& MatchInsn,
-                                        JumpDest ExitDest) {
-  ArrayRef<Stmt *> Exprs = S.getExprs();
+namespace {
+  namespace match_detail {
+    bool eqConstantInt(const llvm::ConstantInt *LHS, const llvm::ConstantInt *RHS) {
+      const llvm::APInt& LV = LHS->getValue();
+      const llvm::APInt& RV = RHS->getValue();
+      assert(LV.isSignMask() == RV.isSignMask() && "Must be same sign");
+      return LV == RV;
+    }
 
-  auto EI = Exprs.begin();
-  const auto EE = Exprs.end();
+    int cmpConstantInt(const llvm::ConstantInt *LHS, const llvm::ConstantInt *RHS) {
+      const llvm::APInt& LV = LHS->getValue();
+      const llvm::APInt& RV = RHS->getValue();
+      if(LV == RV) return 0;
 
-  assert(Exprs.size() >= 1 && "all match cases should have 1 case");
-  Expr *CaseExprFirst = cast<Expr>(*EI);
-  ++EI;
-
-  llvm::ConstantInt *CaseVal =
-    Builder.getInt(CaseExprFirst->EvaluateKnownConstInt(getContext()));
-
-  // Emit debuginfo for the case value if it is an enum value.
-  const ConstantExpr *CE;
-  if (auto ICE = dyn_cast<ImplicitCastExpr>(CaseExprFirst))
-    CE = dyn_cast<ConstantExpr>(ICE->getSubExpr());
-  else
-    CE = dyn_cast<ConstantExpr>(CaseExprFirst);
-  if (CE) {
-    if (auto DE = dyn_cast<DeclRefExpr>(CE->getSubExpr()))
-      if (CGDebugInfo *Dbg = getDebugInfo())
-        if (CGM.getCodeGenOpts().hasReducedDebugInfo())
-          Dbg->EmitGlobalVariable(DE->getDecl(),
-              APValue(llvm::APSInt(CaseVal->getValue())));
-  } 
-
-  llvm::BasicBlock *CaseDest = createBasicBlock("ma.bb");
-  MatchInsn.addCase(CaseVal, CaseDest);
-  
-  EmitBlock(CaseDest);
-
-  // If this code is reachable then emit a stop point (if generating
-  // debug info). We have to do this ourselves because we are on the
-  // "simple" statement path.
-  if (HaveInsertPoint())
-    EmitStopPoint(&S);
-
-
-  // iteratively add consecutive cases to this match stmt.
-  for (; EI < EE; ++EI) {
-    Expr *CaseExprCur = cast<Expr>(*EI);
-    llvm::ConstantInt *CaseVal =
-      Builder.getInt(CaseExprCur->EvaluateKnownConstInt(getContext()));
-    
-    MatchInsn.addCase(CaseVal, CaseDest);
-  }
-
-  RunCleanupsScope CaseScope(*this);
-  EmitStmt(S.getSubStmt());
-  CaseScope.ForceCleanup();
-
-  EmitBranchThroughCleanup(ExitDest);
-}
-
-static bool FindMatchCaseStatementForValue(const MatchStmt &S, const llvm::APSInt& ConstantCondValue, ASTContext &C, const MatchCaseStmt *& OutCase) {
-  for(Stmt *Case: S.getMatchCases()) {
-    const MatchCaseStmt* MC = cast<MatchCaseStmt>(Case);
-    for(Stmt *E: MC->getExprs()) {
-      const Expr* CaseExpr = cast<Expr>(E);
-      if(CaseExpr->EvaluateKnownConstInt(C) == ConstantCondValue) {
-        OutCase = MC;
-        return true;
+      assert(LV.isSignMask() == RV.isSignMask() && "Must be same sign");
+      if(LV.isSignMask()) {
+        return LV.ult(RV) ? -1 : 1;
+      }
+      else {
+        return LV.slt(RV) ? -1 : 1;
       }
     }
-  }
 
-  return false;
+    struct MatchDestination {
+      const Stmt *SubStmt;
+      llvm::BasicBlock *Block;
+    };
+    
+    using NodeId = size_t;
+    using ConstantIntsTy = llvm::SmallVector<llvm::ConstantInt *, 8>;
+
+    class LayerIterator {
+    public:
+      struct Single {
+        NodeId Id;
+        llvm::iterator_range<ConstantIntsTy::const_iterator> Cases;
+        MatchDestination *MatchDest;
+      };
+
+      size_t Depth;
+      std::vector<Single> Iters;
+      ArrayRef<llvm::Value *> Values;
+
+      LayerIterator(ArrayRef<llvm::Value *> Values) 
+        : Depth(0), Iters(), Values(Values) {}
+
+      bool last_step() const {
+        return Values.size() == Depth;
+      }
+    };
+
+    class Graph {
+    public:
+      using ChildrenTy = llvm::SmallVector<NodeId, 8>;
+
+      struct Node {
+        llvm::ConstantInt *Case = nullptr;
+        llvm::Value *Value = nullptr;
+        ChildrenTy Children = {};
+
+        bool HasDefault = false;
+        NodeId DefaultNode = 0;
+
+        bool IsLeaf = false;
+        llvm::BasicBlock *Block = nullptr;
+        MatchDestination *MatchDest = nullptr;
+
+        Node(llvm::ConstantInt *Case, llvm::Value *Value)
+          : Case(Case), Value(Value) {}
+      };
+
+    private:
+      std::vector<Node> Nodes;
+
+      NodeId newDefaultNode(Node& N, llvm::ConstantInt *Case, llvm::Value *Value) {
+        assert(!N.IsLeaf && !N.MatchDest && "Cannot have children on a leaf node");
+
+        // Push children first
+        NodeId Id = Nodes.size();
+        N.HasDefault = true;
+        N.DefaultNode = Id;
+        // Then push new node as this invalidates R
+        Nodes.push_back(Node(Case, Value));
+        return Id;
+      }
+
+      NodeId newChildNode(Node& N, llvm::ConstantInt *Case, llvm::Value *Value) {
+        assert(!N.IsLeaf && !N.MatchDest && "Cannot have children on a leaf node");
+
+        // Push children first
+        NodeId Id = Nodes.size();
+        N.Children.push_back(Id);
+        // Then push new node as this invalidates R
+        Nodes.push_back(Node(Case, Value));
+        return Id;
+      }
+
+    public:
+      Graph() : Nodes() {}
+
+      void makeRoot(LayerIterator& Layer) {
+        assert(Nodes.empty() && "Root already exists");
+        assert(!Layer.Values.empty() && "Should have values to iterate on");
+        Nodes.push_back(Node(nullptr, Layer.Values[0]));
+      }
+
+      Node& root() {
+        return Nodes.front();
+      }
+
+      Node& get(NodeId id) {
+        return Nodes[id];
+      }
+
+      void step(LayerIterator& Layer) {
+        assert(Layer.Depth < Layer.Values.size() && "Must be in range");
+
+        std::vector<LayerIterator::Single> NextLayer;
+        NextLayer.reserve(Layer.Iters.size());
+
+        llvm::Value *const NextSwitch = (Layer.Depth + 1) >= Layer.Values.size() ? nullptr : Layer.Values[Layer.Depth + 1];
+
+        for (const auto &[Id, Cases, MatchStmt]: Layer.Iters) {
+          assert(Cases.begin() + Layer.Depth < Cases.end() && "Must be in rnage");
+          const auto Case = Cases.begin() + Layer.Depth;
+          if(*Case == nullptr) {
+            continue;
+          }
+
+          NodeId NextId = newChildNode(get(Id), *Case, NextSwitch);
+          NextLayer.push_back(LayerIterator::Single{ NextId, Cases, MatchStmt });
+        }
+
+        for (const auto &[Id, Cases, MatchStmt]: Layer.Iters) {
+          assert(Cases.begin() + Layer.Depth < Cases.end() && "Must be in rnage");
+          const auto Case = Cases.begin() + Layer.Depth;
+          if(*Case != nullptr) {
+            continue;
+          }
+
+          {
+            Node &N = get(Id);
+            for (NodeId ChildId: N.Children) {
+              NextLayer.push_back(LayerIterator::Single{ ChildId, Cases, MatchStmt });
+            }
+
+            if(N.HasDefault) {
+              NextLayer.push_back(LayerIterator::Single{ N.DefaultNode, Cases, MatchStmt });
+              continue;
+            }
+          }
+          
+          NodeId DefaultId = newDefaultNode(get(Id), *Case, NextSwitch);
+          NextLayer.push_back(LayerIterator::Single{ DefaultId, Cases, MatchStmt });
+        }
+        
+        Layer.Depth += 1;
+        Layer.Iters = std::move(NextLayer);
+      }
+
+      void final_step(LayerIterator& Layer) {
+        assert(Layer.Depth == Layer.Values.size()
+            && "Should have finished iterating");
+
+        std::sort(Layer.Iters.begin(), Layer.Iters.end(),
+                  [](const LayerIterator::Single& LHS, const LayerIterator::Single& RHS) {
+                    for (const auto& [L, R]: zip_equal(LHS.Cases, RHS.Cases)) {
+                      if(L == nullptr || R == nullptr) {
+                        if((L == nullptr) != (R == nullptr))
+                          return (L == nullptr) < (R == nullptr);
+                      }
+                      else {
+                        int c = cmpConstantInt(L, R);
+                        if (c != 0) return c < 0;
+                      }
+                    }
+
+                    return false;
+                  });
+
+        for (const auto &[Id, Cases, MatchStmt]: Layer.Iters) {
+          Node &N = get(Id);
+          assert(N.Value == nullptr && "Leaf node should have no value");
+          N.IsLeaf = true;
+
+          if(N.MatchDest == nullptr) {
+            N.MatchDest = MatchStmt;
+          }
+        }
+      }
+
+      MutableArrayRef<Node> nodes() {
+        return Nodes;
+      }
+    };
+  }
 }
 
 void CodeGenFunction::EmitMatchStmt(const MatchStmt &S) {
+#if 0
   // See if we can constant fold the condition of the switch and therefore only
   // emit the live case statement (if any) of the switch.
   llvm::APSInt ConstantCondValue;
@@ -2372,55 +2500,200 @@ void CodeGenFunction::EmitMatchStmt(const MatchStmt &S) {
       return;
     }
   }
+#endif
 
   JumpDest MatchExit = getJumpDestInCurrentScope("ma.epilog");
 
   RunCleanupsScope ConditionScope(*this);
 
-  if (S.getInit())
-    EmitStmt(S.getInit());
+  const size_t CondValsCount = S.getConds().size();
+  llvm::SmallVector<llvm::Value *, 8> CondVals;
+  CondVals.reserve(CondValsCount);
+  for(Stmt *C: S.getConds()) {
+    llvm::Value *CondV = EmitScalarExpr(cast<Expr>(C));
 
-  if (S.getConditionVariable())
-    EmitDecl(*S.getConditionVariable());
-  llvm::Value *CondV = EmitScalarExpr(S.getCond());
+    CondVals.push_back(CondV);
+  }
 
-  // Create basic block to hold stuff that comes after match
-  // statement.
-  llvm::BasicBlock *DefaultBlock = createBasicBlock("ma.default");
-  llvm::SwitchInst *MatchInsn = Builder.CreateSwitch(CondV, DefaultBlock);
-
-  // Clear the insertion point to indicate we are in unreachable code.
-  Builder.ClearInsertionPoint();
-
-  // Emit match body.
+  llvm::SmallVector<match_detail::MatchDestination, 8> MatchDests;
+  MatchDests.reserve(S.getMatchCases().size());
   for(const Stmt *rawC: S.getMatchCases()) {
     const MatchCaseStmt* MC = cast<MatchCaseStmt>(rawC);
+    llvm::BasicBlock *BB = createBasicBlock("ma.leaf");
+    MatchDests.push_back({ MC->getSubStmt(), BB });
+  }
 
-    EmitMatchCaseStmt(*MC, *MatchInsn, MatchExit);
+  match_detail::Graph Graph;
+  SmallVector<llvm::ConstantInt *, 8> CasesRaw;
+
+  for(const auto& [rawC, MatchDest]: zip_equal(S.getMatchCases(), MatchDests)) {
+    const MatchCaseStmt* MC = cast<MatchCaseStmt>(rawC);
+
+    for(ArrayRef<Stmt *> CE: MC->getChunkedExprs()) {
+      assert(CE.size() == CondValsCount && "Must be same size");
+
+      for(Stmt *E: CE) {
+        if (MatchDefaultStmt* CaseDefault = dyn_cast<MatchDefaultStmt>(E)) {
+          CasesRaw.push_back(nullptr);
+        }
+        else {
+          Expr *CaseExpr = cast<Expr>(E);
+          llvm::ConstantInt *CaseVal =
+            Builder.getInt(cast<Expr>(E)->EvaluateKnownConstInt(getContext()));
+
+          // Emit debuginfo for the case value if it is an enum value.
+          const ConstantExpr *CE;
+          if (auto ICE = dyn_cast<ImplicitCastExpr>(CaseExpr))
+            CE = dyn_cast<ConstantExpr>(ICE->getSubExpr());
+          else
+            CE = dyn_cast<ConstantExpr>(CaseExpr);
+          if (CE) {
+            if (auto DE = dyn_cast<DeclRefExpr>(CE->getSubExpr()))
+              if (CGDebugInfo *Dbg = getDebugInfo())
+                if (CGM.getCodeGenOpts().hasReducedDebugInfo())
+                  Dbg->EmitGlobalVariable(DE->getDecl(),
+                      APValue(llvm::APSInt(CaseVal->getValue())));
+          }
+
+          CasesRaw.push_back(CaseVal);
+        }
+      }
+    }
+  }
+
+  {
+    match_detail::LayerIterator Layer(ArrayRef<llvm::Value *>{CondVals});
+  
+    {
+      llvm::ChunkedArrayRef<llvm::ConstantInt *> ChunkedInts(CasesRaw, CondValsCount);
+      
+      auto CI = ChunkedInts.begin();
+      const auto CE = ChunkedInts.end();
+      for(const auto& [rawC, MatchDest]: zip_equal(S.getMatchCases(), MatchDests)) {
+        const MatchCaseStmt* MC = cast<MatchCaseStmt>(rawC);
+
+        auto PartialCE = CI + MC->getNumCases();
+
+        for(; CI < PartialCE; ++CI) {
+          ArrayRef R = *CI;
+          Layer.Iters.push_back(match_detail::LayerIterator::Single{ 0, make_range(R.begin(), R.end()), &MatchDest });
+        }
+      }
+
+      assert(CI == CE && "Should have traversed all the chunks");
+    }
+
+    Graph.makeRoot(Layer);
+
+    while(Layer.Depth < Layer.Values.size()) {
+      Graph.step(Layer);
+    }
+
+    Graph.final_step(Layer);
+  }
+
+  using Node = match_detail::Graph::Node;
+  using NodeId = match_detail::NodeId;
+  MutableArrayRef<Node> Nodes = Graph.nodes();
+
+  for(Node& N: Nodes.drop_front()) {
+    if(N.IsLeaf) {
+      assert(N.MatchDest->Block != nullptr
+          && "MatchDest Block should already be assigned");
+    }
+    else {
+      assert(N.Block == nullptr);
+
+      N.Block = createBasicBlock("ma.branch");
+    }
+  }
+
+  const auto GetBlock = [](Node &Child)
+    -> llvm::BasicBlock * {
+    if(Child.IsLeaf) {
+      assert(Child.MatchDest->Block != nullptr);
+
+      return Child.MatchDest->Block;
+    }
+    else {
+      assert(Child.Block != nullptr);
+
+      return Child.Block;
+    }
+  };
+
+  {
+    Node &N = Graph.root();
+    assert(!N.IsLeaf && "Root cannot be a leaf node");
+    assert(N.Block == nullptr && "Must not have a block");
+    assert(N.HasDefault && "Match must have default");
+    
+    Node &D = Graph.get(N.DefaultNode);
+    llvm::BasicBlock *DefaultBlock = GetBlock(D);
+
+    assert(N.Value != nullptr && "Must have a value");
+    llvm::SwitchInst *MatchInsn = Builder.CreateSwitch(N.Value, DefaultBlock);
+
+    for (NodeId CID: N.Children) {
+      Node &Child = Graph.get(CID);
+      llvm::BasicBlock *Block = GetBlock(Child);
+      MatchInsn->addCase(Child.Case, Block);
+    }
+
+    // Clear the insertion point to indicate we are in unreachable code.
+    Builder.ClearInsertionPoint();
+  }
+
+  for (Node &N : Nodes.drop_front()) {
+    if(N.IsLeaf) {
+      continue;
+    }
+    else {
+      assert(N.Block != nullptr);
+      EmitBlock(N.Block);
+      assert(HaveInsertPoint() && "Must be reachable");
+
+      Node &D = Graph.get(N.DefaultNode);
+      llvm::BasicBlock *DefaultBlock = GetBlock(D);
+
+      assert(N.Value != nullptr && "Must have a value");
+      llvm::SwitchInst *MatchInsn = Builder.CreateSwitch(N.Value, DefaultBlock);
+
+      for (NodeId CID: N.Children) {
+        Node &Child = Graph.get(CID);
+        llvm::BasicBlock *Block = GetBlock(Child);
+        MatchInsn->addCase(Child.Case, Block);
+      }
+
+      // Clear the insertion point to indicate we are in unreachable code.
+      Builder.ClearInsertionPoint();
+    }
+  }
+
+  for (const match_detail::MatchDestination& MD: MatchDests) {
+    assert(MD.Block != nullptr && "Must have a block");
+    EmitBlock(MD.Block);
+
+    // If this code is reachable then emit a stop point (if generating
+    // debug info). We have to do this ourselves because we are on the
+    // "simple" statement path.
+    if (HaveInsertPoint())
+      EmitStopPoint(MD.SubStmt);
+
+    RunCleanupsScope CaseScope(*this);
+    EmitStmt(MD.SubStmt);
+    CaseScope.ForceCleanup();
+
+    EmitBranchThroughCleanup(MatchExit);
   }
 
   ConditionScope.ForceCleanup();
-
-  MatchInsn->setDefaultDest(DefaultBlock);
-
-  // If a default was never emitted:
-  if (!DefaultBlock->getParent()) {
-    // If we have cleanups, emit the default block so that there's a
-    // place to jump through the cleanups from.
-    if (ConditionScope.requiresCleanups()) {
-      EmitBlock(DefaultBlock);
-
-    // Otherwise, just forward the default block to the switch end.
-    } else {
-      DefaultBlock->replaceAllUsesWith(MatchExit.getBlock());
-      delete DefaultBlock;
-    }
-  }
 
   // Emit continuation.
   EmitBlock(MatchExit.getBlock(), true);
   incrementProfileCounter(&S);
 
+#if 0
   // If the switch has a condition wrapped by __builtin_unpredictable,
   // create metadata that specifies that the switch is unpredictable.
   // Don't bother if not optimizing because that metadata would not be used.
@@ -2433,6 +2706,7 @@ void CodeGenFunction::EmitMatchStmt(const MatchStmt &S) {
                               MDHelper.createUnpredictable());
     }
   }
+#endif
 }
 
 static std::string

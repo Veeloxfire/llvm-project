@@ -191,13 +191,26 @@ void ASTStmtReader::VisitDefaultStmt(DefaultStmt *S) {
 
 void ASTStmtReader::VisitMatchCaseStmt(MatchCaseStmt *S) {
   VisitStmt(S);
-  unsigned NumExprs = Record.readInt();
-  MutableArrayRef<Stmt *> Exprs = S->getExprs();
-  assert(Exprs.size() == NumExprs && "MatchCase Exprs size mismatch");
+  unsigned NumCases = Record.readInt();
+  unsigned ExprPerCase = Record.readInt();
+  assert(S->getNumCases() == NumCases
+      && "MatchCase Serialize mismatch");
+  assert(S->getExprPerCase() == ExprPerCase
+      && "MatchCase Serialize mismatch");
+
+  MutableArrayRef<Stmt *> Exprs = S->getAllExprs();
+  assert(Exprs.size() == NumCases * ExprPerCase
+      && "MatchCase Exprs size mismatch");
+
   for(Stmt *&C: Exprs) {
     C = Record.readSubExpr();
   }
   S->setSubStmt(Record.readSubStmt());
+}
+
+void ASTStmtReader::VisitMatchDefaultStmt(MatchDefaultStmt *S) {
+  VisitStmt(S);
+  S->setDefaultLoc(readSourceLocation());
 }
 
 void ASTStmtReader::VisitLabelStmt(LabelStmt *S) {
@@ -288,21 +301,21 @@ void ASTStmtReader::VisitSwitchStmt(SwitchStmt *S) {
 void ASTStmtReader::VisitMatchStmt(MatchStmt *S) {
   VisitStmt(S);
 
-  bool HasInit = Record.readInt();
-  bool HasVar = Record.readInt();
+  unsigned NumExprs = Record.readInt();
   unsigned NumCases = Record.readInt();
 
+  MutableArrayRef<Stmt *> Exprs = S->getConds();
+  assert(Exprs.size() == NumExprs && "Match size mismatch");
   MutableArrayRef<Stmt *> Cases = S->getMatchCases();
   assert(Cases.size() == NumCases && "Match size mismatch");
 
-  S->setCond(Record.readSubExpr());
-  if (HasInit)
-    S->setInit(Record.readSubStmt());
-  if (HasVar)
-    S->setConditionVariableDeclStmt(cast<DeclStmt>(Record.readSubStmt()));
-
   S->setMatchLoc(readSourceLocation());
   S->setLParenLoc(readSourceLocation());
+
+  for(Stmt *&C: Exprs) {
+    C = Record.readSubStmt();
+  }
+
   S->setRParenLoc(readSourceLocation());
 
   for(Stmt *&C: Cases) {
@@ -2967,7 +2980,12 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
     case STMT_MATCH_CASE:
       S = MatchCaseStmt::CreateEmpty(
           Context,
-          /*NumExprs*/ Record[ASTStmtReader::NumStmtFields]);
+          /*NumCases=*/ Record[ASTStmtReader::NumStmtFields],
+          /*ExprPerCase=*/ Record[ASTStmtReader::NumStmtFields + 1]);
+      break;
+
+    case STMT_MATCH_DEFAULT:
+      S = MatchDefaultStmt::CreateEmpty(Context);
       break;
 
     case STMT_LABEL:
@@ -2999,9 +3017,8 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
     case STMT_MATCH:
       S = MatchStmt::CreateEmpty(
           Context,
-          /* HasInit=*/Record[ASTStmtReader::NumStmtFields],
-          /* HasVar=*/Record[ASTStmtReader::NumStmtFields + 1],
-          /* NumCases=*/Record[ASTStmtReader::NumStmtFields + 2]);
+          /* NumExprs=*/Record[ASTStmtReader::NumStmtFields],
+          /* NumCases=*/Record[ASTStmtReader::NumStmtFields + 1]);
       break;
 
     case STMT_WHILE:

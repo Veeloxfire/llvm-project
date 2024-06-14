@@ -45,6 +45,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/FormatVariadic.h"
 
 using namespace clang;
 using namespace sema;
@@ -512,52 +513,73 @@ Sema::ActOnCaseExpr(SourceLocation CaseLoc, ExprResult Val) {
   return Converted;
 }
 
-ExprResult
-Sema::ActOnMatchCaseExpr(ExprResult Val) {
-  if (!Val.get())
-    return Val;
-
-  if (DiagnoseUnexpandedParameterPack(Val.get()))
-    return ExprError();
- 
+bool
+Sema::ActOnMatchCaseExprs(MutableArrayRef<Stmt *> Vals) { 
   assert(!getCurFunction()->MatchStack.empty() && "Match case outside match statement");
 
-  Expr *CondExpr = getCurFunction()->MatchStack.back();
-  if (!CondExpr)
-    return ExprError();
+  ArrayRef<Expr *> CondExprs = getCurFunction()->MatchStack.back();
 
-  QualType CondType = CondExpr->getType();
+  if(Vals.size() != CondExprs.size())
+    return false;
 
-  auto CheckAndFinish = [&](Expr *E) {
-    if (CondType->isDependentType() || E->isTypeDependent())
-      return ExprResult(E);
+  auto VI = Vals.begin();
+  const auto VE = Vals.end();
 
-    if (getLangOpts().CPlusPlus11) {
-      // C++11 [stmt.switch]p2: the constant-expression shall be a converted
-      // constant expression of the promoted type of the switch condition.
-      llvm::APSInt TempVal;
-      return CheckConvertedConstantExpression(E, CondType, TempVal,
-                                              CCEK_CaseValue);
+  auto CI = CondExprs.begin();
+  const auto CE = CondExprs.end();
+
+  for(; VI < VE && CI < CE; ++VI, ++CI) {
+    const Expr *CondExpr = *CI;
+
+    if (MatchDefaultStmt *D = dyn_cast<MatchDefaultStmt>(*VI)) {
+      continue;
     }
+    else {
+      Expr *Val = cast<Expr>(*VI);
+      if (DiagnoseUnexpandedParameterPack(Val))
+        return true;
 
-    ExprResult ER = E;
-    if (!E->isValueDependent())
-      ER = VerifyIntegerConstantExpression(E, AllowFold);
-    if (!ER.isInvalid())
-      ER = DefaultLvalueConversion(ER.get());
-    if (!ER.isInvalid())
-      ER = ImpCastExprToType(ER.get(), CondType, CK_IntegralCast);
-    if (!ER.isInvalid())
-      ER = ActOnFinishFullExpr(ER.get(), ER.get()->getExprLoc(), false);
-    return ER;
-  };
+      QualType CondType = CondExpr->getType();
 
-  ExprResult Converted = CorrectDelayedTyposInExpr(
-      Val, /*InitDecl=*/nullptr, /*RecoverUncorrectedTypos=*/false,
-      CheckAndFinish);
-  if (Converted.get() == Val.get())
-    Converted = CheckAndFinish(Val.get());
-  return Converted;
+      auto CheckAndFinish = [&](Expr *E) {
+        if (CondType->isDependentType() || E->isTypeDependent())
+          return ExprResult(E);
+
+        if (getLangOpts().CPlusPlus11) {
+          // C++11 [stmt.switch]p2: the constant-expression shall be a converted
+          // constant expression of the promoted type of the switch condition.
+          llvm::APSInt TempVal;
+          return CheckConvertedConstantExpression(E, CondType, TempVal,
+                                                  CCEK_CaseValue);
+        }
+
+        ExprResult ER = E;
+        if (!E->isValueDependent())
+          ER = VerifyIntegerConstantExpression(E, AllowFold);
+        if (!ER.isInvalid())
+          ER = DefaultLvalueConversion(ER.get());
+        if (!ER.isInvalid())
+          ER = ImpCastExprToType(ER.get(), CondType, CK_IntegralCast);
+        if (!ER.isInvalid())
+          ER = ActOnFinishFullExpr(ER.get(), ER.get()->getExprLoc(), false);
+        return ER;
+      };
+
+      ExprResult Converted = CorrectDelayedTyposInExpr(
+          Val, /*InitDecl=*/nullptr, /*RecoverUncorrectedTypos=*/false,
+          CheckAndFinish);
+      if (Converted.get() == Val)
+        Converted = CheckAndFinish(Val);
+
+      if(Converted.isInvalid())
+        return true;
+      Val = Converted.get();
+
+      *VI = Val;
+    }
+  }
+
+  return false;
 }
 
 StmtResult
@@ -598,8 +620,12 @@ void Sema::ActOnCaseStmtBody(Stmt *S, Stmt *SubStmt) {
 }
 
 StmtResult
-Sema::ActOnMatchCaseStmt(ArrayRef<Stmt *> Exprs, Stmt *SubStmt) { 
-  return MatchCaseStmt::Create(Context, Exprs, SubStmt);
+Sema::ActOnMatchDefaultStmt(SourceLocation DefaultLoc) {
+  return MatchDefaultStmt::Create(Context, DefaultLoc);
+}
+StmtResult
+Sema::ActOnMatchCaseStmt(ArrayRef<Stmt *> Exprs, unsigned ExprPerCase, Stmt *SubStmt) { 
+  return MatchCaseStmt::Create(Context, Exprs, ExprPerCase, SubStmt);
 }
 
 StmtResult
@@ -1085,20 +1111,47 @@ namespace {
     llvm::APSInt apsInt;
     Expr *CaseExpr;
     MatchCaseStmt *Case;
+    QualType CondTypeBeforePromotion;
+
+    friend void swap(CaseTuple &LHS, CaseTuple &RHS) {
+      using std::swap;
+      swap(LHS.apsInt, RHS.apsInt);
+      swap(LHS.CaseExpr, RHS.CaseExpr);
+      swap(LHS.Case, RHS.Case);
+      swap(LHS.CondTypeBeforePromotion, RHS.CondTypeBeforePromotion);
+    }
   };
 }
 
-/// CmpCaseTuple - Comparison predicate for sorting case value tuples.
+/// CmpChunkedCaseTuple - Comparison predicate for sorting case value tuples.
 ///
-static bool CmpCaseTuple(const CaseTuple& lhs,
-                         const CaseTuple& rhs) {
-  if (lhs.apsInt < rhs.apsInt)
-    return true;
+static bool CmpChunkedCaseTuple(const ArrayRef<CaseTuple>& lhs,
+                                const ArrayRef<CaseTuple>& rhs) {
+  for(const auto& [l, r]: zip_equal(lhs, rhs)) {
+    if ((l.CaseExpr != nullptr) && (r.CaseExpr != nullptr)) {
+      if (l.apsInt < r.apsInt)
+        return true;
+    }
+    else if((l.CaseExpr == nullptr) != (r.CaseExpr == nullptr)) {
+      return (l.CaseExpr == nullptr) < (r.CaseExpr == nullptr);
+    }
+  }
 
-  if (lhs.apsInt == rhs.apsInt &&
-      lhs.Case->getBeginLoc() < rhs.Case->getBeginLoc())
-    return true;
-  return false;
+  return lhs[0].Case->getBeginLoc() < rhs[0].Case->getBeginLoc();
+}
+
+/// CmpChunkedCaseTuple - Comparison predicate for sorting case value tuples.
+///
+static bool EqChunkedCaseTuple(const ArrayRef<CaseTuple>& lhs,
+                               const ArrayRef<CaseTuple>& rhs) {
+  for(const auto& [l, r]: zip_equal(lhs, rhs)) {
+    if ((l.CaseExpr == nullptr) != (r.CaseExpr == nullptr))
+      return false;
+    if ((l.CaseExpr != nullptr && r.CaseExpr != nullptr) && l.apsInt != r.apsInt)
+      return false;
+  }
+
+  return true;
 }
 
 /// CmpEnumVals - Comparison predicate for sorting enumeration values.
@@ -1263,6 +1316,40 @@ static bool ShouldDiagnoseSwitchCaseNotInEnum(const Sema &S,
                                               const Expr *CaseExpr,
                                               EnumValsTy::iterator &EI,
                                               EnumValsTy::iterator &EIEnd,
+                                              const llvm::APSInt &Val) {
+  if (!ED->isClosed())
+    return false;
+
+  if (const DeclRefExpr *DRE =
+          dyn_cast<DeclRefExpr>(CaseExpr->IgnoreParenImpCasts())) {
+    if (const VarDecl *VD = dyn_cast<VarDecl>(DRE->getDecl())) {
+      QualType VarType = VD->getType();
+      QualType EnumType = S.Context.getTypeDeclType(ED);
+      if (VD->hasGlobalStorage() && VarType.isConstQualified() &&
+          S.Context.hasSameUnqualifiedType(EnumType, VarType))
+        return false;
+    }
+  }
+
+  if (ED->hasAttr<FlagEnumAttr>())
+    return !S.IsValueInFlagEnum(ED, Val, false);
+
+  while (EI != EIEnd && EI->first < Val)
+    EI++;
+
+  if (EI != EIEnd && EI->first == Val)
+    return false;
+
+  return true;
+}
+
+/// Returns true if we should emit a diagnostic about this case expression not
+/// being a part of the enum used in the switch controlling expression.
+static bool ShouldDiagnoseSwitchCaseNotInEnum(const Sema &S,
+                                              const EnumDecl *ED,
+                                              const Expr *CaseExpr,
+                                              EnumValsTy::const_iterator &EI,
+                                              EnumValsTy::const_iterator &EIEnd,
                                               const llvm::APSInt &Val) {
   if (!ED->isClosed())
     return false;
@@ -1734,151 +1821,233 @@ Sema::ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
   return SS;
 }
 
-Sema::ConditionResult Sema::ActOnStartOfMatchStmt(ConditionResult Cond) {
-  Expr *CondExpr = Cond.get().second;
-  assert((Cond.isInvalid() || CondExpr) && "match with no condition");
+bool Sema::ActOnStartOfMatchStmt(SourceLocation MatchLoc, ArrayRef<Expr *> Exprs) {
+  assert(!Exprs.empty() && "match with no condition");
 
-  getCurFunction()->MatchStack.push_back(CondExpr);
-  return Cond;
+  for(Expr *CondExpr : Exprs) {
+    if (CondExpr && !CondExpr->isTypeDependent()) {
+      // We have already converted the expression to an integral or enumeration
+      // type, when we parsed the match condition. There are cases where we don't
+      // have an appropriate type, e.g. a typo-expr Cond was corrected to an
+      // inappropriate-type expr, we just return an error.
+      if (!CondExpr->getType()->isIntegralOrEnumerationType())
+        return true;
+      if (CondExpr->isKnownToHaveBooleanValue()) {
+        // match(bool_expr) {...} is often a programmer error, e.g.
+        //   match(n && mask) { ... }  // Doh - should be "n & mask".
+        // One can always use an if statement instead of switch(bool_expr).
+        Diag(MatchLoc, diag::warn_bool_switch_condition)
+          << CondExpr->getSourceRange();
+      }
+    }
+  }
+
+  getCurFunction()->MatchStack.push_back(Exprs);
+  return false;
 }
 
 StmtResult
-Sema::ActOnFinishMatchStmt(SourceLocation MatchLoc,
-                           SourceLocation LParenLoc,
-                           Stmt *InitStmt, ConditionResult Cond,
-                           SourceLocation RParenLoc,
+Sema::ActOnFinishMatchStmt(SourceLocation MatchLoc, SourceLocation LParenLoc,
+                           ArrayRef<Expr *> Exprs, SourceLocation RParenLoc,
                            ArrayRef<Stmt *> Cases) {
-  Expr *CondExpr = Cond.get().second;
-  assert((Cond.isInvalid() || CondExpr) && "match with no condition");
+  assert(!Exprs.empty() && "missing expressions");
 
   assert(!getCurFunction()->MatchStack.empty() && "invalid match stack");
-  assert(CondExpr == getCurFunction()->MatchStack.back() &&
+  assert(Exprs.data() == getCurFunction()->MatchStack.back().data() &&
          "match stack missing push/pop!");
 
   getCurFunction()->MatchStack.pop_back();
 
-  if (CondExpr && !CondExpr->isTypeDependent()) {
-    // We have already converted the expression to an integral or enumeration
-    // type, when we parsed the match condition. There are cases where we don't
-    // have an appropriate type, e.g. a typo-expr Cond was corrected to an
-    // inappropriate-type expr, we just return an error.
-    if (!CondExpr->getType()->isIntegralOrEnumerationType())
-      return StmtError();
-    if (CondExpr->isKnownToHaveBooleanValue()) {
-      // match(bool_expr) {...} is often a programmer error, e.g.
-      //   match(n && mask) { ... }  // Doh - should be "n & mask".
-      // One can always use an if statement instead of switch(bool_expr).
-      Diag(MatchLoc, diag::warn_bool_switch_condition)
-          << CondExpr->getSourceRange();
-    }
+  const unsigned ExprPerCase = Exprs.size();
+ 
+  struct CondTuple {
+    Expr* CondExpr;
+    QualType CondType;
+    const Expr *CondExprBeforePromotion;
+    QualType CondTypeBeforePromotion;
+    bool HasDependentValue;
+    unsigned CondWidth;
+    bool CondIsSigned;
+    unsigned CondWidthBeforePromotion;
+    bool CondIsSignedBeforePromotion;
+  };
+  typedef SmallVector<CondTuple, 64> ConditionValsTy;
+  ConditionValsTy CondExprs;
+
+  bool HasAnyDependentValue = false;
+
+  for(Expr *CondExpr: Exprs) {
+    QualType CondType = CondExpr->getType();
+
+    // C++ 6.4.2.p2:
+    // Integral promotions are performed (on the switch condition).
+    //
+    // A case value unrepresentable by the original switch condition
+    // type (before the promotion) doesn't make sense, even when it can
+    // be represented by the promoted type.  Therefore we need to find
+    // the pre-promotion type of the switch condition.
+    const Expr *CondExprBeforePromotion = CondExpr;
+    QualType CondTypeBeforePromotion =
+      GetTypeBeforeIntegralPromotion(CondExprBeforePromotion);
+
+    // Get the bitwidth of the switched-on value after promotions. We must
+    // convert the integer case values to this width before comparison.
+    bool HasDependentValue
+      = CondExpr->isTypeDependent() || CondExpr->isValueDependent();
+    unsigned CondWidth = HasDependentValue ? 0 : Context.getIntWidth(CondType);
+    bool CondIsSigned = CondType->isSignedIntegerOrEnumerationType();
+
+    HasAnyDependentValue = HasAnyDependentValue || HasDependentValue;
+
+    // Get the width and signedness that the condition might actually have, for
+    // warning purposes.
+    // FIXME: Grab an IntRange for the condition rather than using the unpromoted
+    // type.
+    unsigned CondWidthBeforePromotion
+      = HasDependentValue ? 0 : Context.getIntWidth(CondTypeBeforePromotion);
+    bool CondIsSignedBeforePromotion
+      = CondTypeBeforePromotion->isSignedIntegerOrEnumerationType();
+  
+    CondExprs.push_back({ CondExpr, CondType, CondExprBeforePromotion, CondTypeBeforePromotion, HasDependentValue, CondWidth, CondIsSigned, CondWidthBeforePromotion, CondIsSignedBeforePromotion });
   }
 
   if (Cases.size() == 0) return StmtError();
-
-  QualType CondType = CondExpr->getType();
-
-  // C++ 6.4.2.p2:
-  // Integral promotions are performed (on the switch condition).
-  //
-  // A case value unrepresentable by the original switch condition
-  // type (before the promotion) doesn't make sense, even when it can
-  // be represented by the promoted type.  Therefore we need to find
-  // the pre-promotion type of the switch condition.
-  const Expr *CondExprBeforePromotion = CondExpr;
-  QualType CondTypeBeforePromotion =
-      GetTypeBeforeIntegralPromotion(CondExprBeforePromotion);
-
-  // Get the bitwidth of the switched-on value after promotions. We must
-  // convert the integer case values to this width before comparison.
-  bool HasDependentValue
-    = CondExpr->isTypeDependent() || CondExpr->isValueDependent();
-  unsigned CondWidth = HasDependentValue ? 0 : Context.getIntWidth(CondType);
-  bool CondIsSigned = CondType->isSignedIntegerOrEnumerationType();
-
-  // Get the width and signedness that the condition might actually have, for
-  // warning purposes.
-  // FIXME: Grab an IntRange for the condition rather than using the unpromoted
-  // type.
-  unsigned CondWidthBeforePromotion
-    = HasDependentValue ? 0 : Context.getIntWidth(CondTypeBeforePromotion);
-  bool CondIsSignedBeforePromotion
-    = CondTypeBeforePromotion->isSignedIntegerOrEnumerationType();
 
   // Accumulate all of the case values in a vector so that we can sort them
   // and detect duplicates.  This vector contains the APInt for the case after
   // it has been converted to the condition type.
   typedef SmallVector<CaseTuple, 64> CaseValsTy;
-  CaseValsTy CaseVals;
+  CaseValsTy CaseValsRaw;
 
-  DefaultStmt *TheDefaultStmt = nullptr;
+  bool HasFullDefaultStmt = false;
 
+#if 0
   bool CaseListIsErroneous = false;
+#endif
 
   // FIXME: We'd better diagnose missing or duplicate default labels even
   // in the dependent case. Because default labels themselves are never
   // dependent.
   for (Stmt *caseStmt: Cases) {
-
     MatchCaseStmt *CS = cast<MatchCaseStmt>(caseStmt);
 
-    for (Stmt* expr: CS->getExprs()) {
-      Expr *Lo = cast<Expr>(expr);
+    for(ArrayRef<Stmt *> ArmExprs: CS->getChunkedExprs()) {
 
-      if (Lo->isValueDependent()) {
-        HasDependentValue = true;
-        break;
+      assert(ArmExprs.size() == CondExprs.size() && "Match expr length mismatch");
+
+      auto AEI = ArmExprs.begin();
+      const auto AEE = ArmExprs.end();
+
+      auto CEI = CondExprs.begin();
+      const auto CEE = CondExprs.end();
+
+      bool AllDefault = true;
+
+      for (; AEI != AEE && CEI != CEE; ++AEI, ++CEI) {
+        CondTuple& ExpectedCond = *CEI;
+
+        if (MatchDefaultStmt *LoDe = dyn_cast<MatchDefaultStmt>(*AEI)) {
+          CaseValsRaw.push_back(CaseTuple{llvm::APSInt(), nullptr, CS, {}});
+        }
+        else {
+          AllDefault = false;
+
+          Expr *Lo = cast<Expr>(*AEI);
+          if (Lo->isValueDependent()) {
+            ExpectedCond.HasDependentValue = true;
+            HasAnyDependentValue = true;
+            break;
+          }
+
+          // We already verified that the expression has a constant value;
+          // get that value (prior to conversions).
+          const Expr *LoBeforePromotion = Lo;
+          QualType TypeBeforePromotion = GetTypeBeforeIntegralPromotion(LoBeforePromotion);
+          llvm::APSInt LoVal = LoBeforePromotion->EvaluateKnownConstInt(Context);
+
+          // Check the unconverted value is within the range of possible values of
+          // the switch expression.
+          checkCaseValue(*this, Lo->getBeginLoc(), LoVal, ExpectedCond.CondWidthBeforePromotion,
+              ExpectedCond.CondIsSignedBeforePromotion);
+
+          // FIXME: This duplicates the check performed for warn_not_in_enum below.
+          checkEnumTypesInSwitchStmt(*this, ExpectedCond.CondExprBeforePromotion,
+              LoBeforePromotion);
+
+          // Convert the value to the same width/sign as the condition.
+          AdjustAPSInt(LoVal, ExpectedCond.CondWidth, ExpectedCond.CondIsSigned);
+
+          CaseValsRaw.push_back(CaseTuple{LoVal, Lo, CS, TypeBeforePromotion});
+        }
       }
-
-      // We already verified that the expression has a constant value;
-      // get that value (prior to conversions).
-      const Expr *LoBeforePromotion = Lo;
-      GetTypeBeforeIntegralPromotion(LoBeforePromotion);
-      llvm::APSInt LoVal = LoBeforePromotion->EvaluateKnownConstInt(Context);
-
-      // Check the unconverted value is within the range of possible values of
-      // the switch expression.
-      checkCaseValue(*this, Lo->getBeginLoc(), LoVal, CondWidthBeforePromotion,
-          CondIsSignedBeforePromotion);
-
-      // FIXME: This duplicates the check performed for warn_not_in_enum below.
-      checkEnumTypesInSwitchStmt(*this, CondExprBeforePromotion,
-          LoBeforePromotion);
-
-      // Convert the value to the same width/sign as the condition.
-      AdjustAPSInt(LoVal, CondWidth, CondIsSigned);
-
-      CaseVals.push_back(CaseTuple{LoVal, Lo, CS});
+      
+      HasFullDefaultStmt = HasFullDefaultStmt || AllDefault;
+      assert(AEI == AEE && CEI == CEE);
     }
   }
 
-  if (!HasDependentValue) {
-    // If we don't have a default statement, check whether the
-    // condition is constant.
-    llvm::APSInt ConstantCondValue;
-    bool HasConstantCond = false;
-    if (!TheDefaultStmt) {
+  if(!HasFullDefaultStmt) {
+    Diag(MatchLoc, diag::error_missing_match_default);
+    return StmtError();
+  }
+
+#if 0
+  auto ChunkedCaseVals = llvm::ChunkedMutableArrayRef(CaseValsRaw, ExprPerCase);
+
+  if (!HasAnyDependentValue) {
+    // Check whether the condition is constant.
+    SmallVector<std::pair<bool, llvm::APSInt>, 8> ConstantCondValues; 
+    ConstantCondValues.reserve(CondExprs.size());
+
+    for(const CondTuple& ExpectedCond: CondExprs) {
       Expr::EvalResult Result;
-      HasConstantCond = CondExpr->EvaluateAsInt(Result, Context,
-                                                Expr::SE_AllowSideEffects);
-      if (Result.Val.isInt())
-        ConstantCondValue = Result.Val.getInt();
-      assert(!HasConstantCond ||
-             (ConstantCondValue.getBitWidth() == CondWidth &&
-              ConstantCondValue.isSigned() == CondIsSigned));
-      Diag(MatchLoc, diag::warn_switch_default);
+      bool HasConstantCond 
+        = ExpectedCond.CondExpr->EvaluateAsInt(Result, Context,
+                                               Expr::SE_AllowSideEffects);
+      if (Result.Val.isInt()) {
+        assert(HasConstantCond);
+
+        llvm::APSInt Val = Result.Val.getInt();
+        assert(Val.getBitWidth() == ExpectedCond.CondWidth &&
+               Val.isSigned() == ExpectedCond.CondIsSigned);
+
+        ConstantCondValues.push_back({ true, Result.Val.getInt() });
+      }
+      else {
+        assert(!HasConstantCond);
+        ConstantCondValues.push_back({ false, llvm::APSInt{} });
+      }
     }
-    bool ShouldCheckConstantCond = HasConstantCond;
 
     // Sort all the scalar case values so we can easily detect duplicates.
-    llvm::stable_sort(CaseVals, CmpCaseTuple);
+    llvm::stable_sort(ChunkedCaseVals, CmpChunkedCaseTuple);
 
-    if (!CaseVals.empty()) {
-      for (unsigned i = 0, e = CaseVals.size(); i != e; ++i) {
-        if (ShouldCheckConstantCond &&
-            CaseVals[i].apsInt == ConstantCondValue)
-          ShouldCheckConstantCond = false;
+    bool FoundConstantMatch = false;
 
-        if (i != 0 && CaseVals[i].apsInt == CaseVals[i-1].apsInt) {
+    if (!CaseValsRaw.empty()) {
+      for (unsigned i = 0, e = ChunkedCaseVals.size(); i != e; ++i) {
+        if(!FoundConstantMatch) {
+          FoundConstantMatch = true;
+          for(const auto& [Case, Const] : zip_equal(ChunkedCaseVals[i], ConstantCondValues)) {
+            if(Const.first && Const.second != Case.apsInt) {
+              FoundConstantMatch = false;
+              break;
+            }
+          }
+        }
+
+        bool FullDuplicate = i != 0;
+        if(i != 0) {
+          for(const auto& [Prev, Curr] 
+              : zip_equal(ChunkedCaseVals[i - 1], ChunkedCaseVals[i])) {
+            if(Prev.apsInt != Curr.apsInt) {
+              FullDuplicate = false;
+              break;
+            }
+          }
+        }
+#if 0
+        if (FullDuplicate) {
           // If we have a duplicate, report it.
           // First, determine if either case value has a name
           StringRef PrevString, CurrString;
@@ -1910,110 +2079,87 @@ Sema::ActOnFinishMatchStmt(SourceLocation MatchLoc,
           // substmt, but we have no way to do this right now.
           CaseListIsErroneous = true;
         }
+#endif
       }
     }
 
     // Complain if we have a constant condition and we didn't find a match.
-    if (!CaseListIsErroneous &&
-        ShouldCheckConstantCond) {
+    if (!FoundConstantMatch) {
       // TODO: it would be nice if we printed enums as enums, chars as
       // chars, etc.
-      Diag(CondExpr->getExprLoc(), diag::warn_missing_case_for_condition)
-        << toString(ConstantCondValue, 10)
-        << CondExpr->getSourceRange();
+      auto Builder = Diag(Exprs[0]->getExprLoc(), diag::warn_missing_case_for_match_condition) << ConstantCondValues.size();
+
+      for(size_t I = 0, E = std::min(ConstantCondValues.size(), (size_t)3); I < E; ++I) {
+        const auto& Const = ConstantCondValues[I];
+        if(Const.first)
+          Builder << toString(Const.second, 10);
+        else
+          Builder << "<Non-Constant>";
+      }
     }
 
-    // Check to see if switch is over an Enum and handles all of its
-    // values.  We only issue a warning if there is not 'default:', but
-    // we still do the analysis to preserve this information in the AST
-    // (which can be used by flow-based analyes).
-    //
-    const EnumType *ET = CondTypeBeforePromotion->getAs<EnumType>();
 
-    // If match has default case, then ignore it.
-    if (!CaseListIsErroneous && !HasConstantCond &&
-        ET && ET->getDecl()->isCompleteDefinition() &&
-        !ET->getDecl()->enumerators().empty()) {
-      const EnumDecl *ED = ET->getDecl();
-      EnumValsTy EnumVals;
+    SmallVector<std::pair<const EnumDecl *, EnumValsTy>, 8> AllEnumVals;
+    AllEnumVals.reserve(Exprs.size());
 
-      // Gather all enum values, set their type and sort them,
-      // allowing easier comparison with CaseVals.
-      for (auto *EDI : ED->enumerators()) {
-        llvm::APSInt Val = EDI->getInitVal();
-        AdjustAPSInt(Val, CondWidth, CondIsSigned);
-        EnumVals.push_back(std::make_pair(Val, EDI));
-      }
-      llvm::stable_sort(EnumVals, CmpEnumVals);
-      auto EI = EnumVals.begin(), EIEnd =
-        std::unique(EnumVals.begin(), EnumVals.end(), EqEnumVals);
+    for(const auto& Expected: CondExprs) {
+      // Check to see if switch is over an Enum and handles all of its
+      // values.  We only issue an error if there is not 'default:', but
+      // we still do the analysis to preserve this information in the AST
+      // (which can be used by flow-based analyes).
+      const EnumType *ET = Expected.CondTypeBeforePromotion->getAs<EnumType>();
 
-      // See which case values aren't in enum.
-      for (CaseValsTy::const_iterator CI = CaseVals.begin();
-          CI != CaseVals.end(); CI++) {
-        Expr *CaseExpr = CI->CaseExpr;
-        if (ShouldDiagnoseSwitchCaseNotInEnum(*this, ED, CaseExpr, EI, EIEnd,
-                                              CI->apsInt))
-          Diag(CaseExpr->getExprLoc(), diag::warn_not_in_enum)
-            << CondTypeBeforePromotion;
-      }
+      if (ET && ET->getDecl()->isCompleteDefinition() &&
+          !ET->getDecl()->enumerators().empty()) {
+        const EnumDecl *ED = ET->getDecl();
+        EnumValsTy EnumVals;
 
-      // Check which enum vals aren't in switch
-      auto CI = CaseVals.begin();
-
-      SmallVector<DeclarationName,8> UnhandledNames;
-
-      for (EI = EnumVals.begin(); EI != EIEnd; EI++) {
-        // Don't warn about omitted unavailable EnumConstantDecls.
-        switch (EI->second->getAvailability()) {
-        case AR_Deprecated:
-          // Omitting a deprecated constant is ok; it should never materialize.
-        case AR_Unavailable:
-          continue;
-
-        case AR_NotYetIntroduced:
-          // Partially available enum constants should be present. Note that we
-          // suppress -Wunguarded-availability diagnostics for such uses.
-        case AR_Available:
-          break;
+        // Gather all enum values, set their type and sort them,
+        // allowing easier comparison with CaseVals.
+        for (auto *EDI : ED->enumerators()) {
+          llvm::APSInt Val = EDI->getInitVal();
+          AdjustAPSInt(Val, Expected.CondWidth, Expected.CondIsSigned);
+          EnumVals.push_back(std::make_pair(Val, EDI));
         }
+        llvm::stable_sort(EnumVals, CmpEnumVals);
+        auto End = std::unique(EnumVals.begin(), EnumVals.end(), EqEnumVals);
 
-        if (EI->second->hasAttr<UnusedAttr>())
-          continue;
+        EnumVals.erase(End, EnumVals.end());
 
-        // Drop unneeded case values
-        while (CI != CaseVals.end() && CI->apsInt < EI->first)
-          CI++;
-
-        if (CI != CaseVals.end() && CI->apsInt == EI->first)
-          continue;
-        
-        UnhandledNames.push_back(EI->second->getDeclName());
+        AllEnumVals.emplace_back(ED, std::move(EnumVals));
       }
+      else {
+        AllEnumVals.emplace_back(nullptr, EnumValsTy{});
+      }
+    }
+    
+    // Remove duplicates of these too
+    const auto End
+     = std::unique(ChunkedCaseVals.begin(), ChunkedCaseVals.end(), EqChunkedCaseTuple);
 
-      if (TheDefaultStmt && UnhandledNames.empty() && ED->isClosedNonFlag())
-        Diag(TheDefaultStmt->getDefaultLoc(), diag::warn_unreachable_default);
+    ChunkedArrayRef<CaseTuple> UniqueChunkedCaseVals 
+      = ChunkedArrayRef(ChunkedCaseVals.begin(), End);
 
-      // Produce a nice diagnostic if multiple values aren't handled.
-      if (!UnhandledNames.empty()) {
-        auto DB = Diag(CondExpr->getExprLoc(), diag::error_missing_match_case)
-                  << CondExpr->getSourceRange() << (int)UnhandledNames.size();
+    {
+      for(ArrayRef<CaseTuple> Case: UniqueChunkedCaseVals) {
+        for(const auto& [CI, EnumVals]: zip_equal(Case, AllEnumVals)) {
+          if(CI.CaseExpr == nullptr) continue;
 
-        for (size_t I = 0, E = std::min(UnhandledNames.size(), (size_t)3);
-             I != E; ++I)
-          DB << UnhandledNames[I];
-
-        return StmtError();
+          const EnumDecl* ED = EnumVals.first;
+          const EnumValsTy& VS = EnumVals.second;
+          EnumValsTy::const_iterator EI = VS.begin();
+          EnumValsTy::const_iterator EE = VS.end();
+          if (ED && ShouldDiagnoseSwitchCaseNotInEnum(*this, ED, CI.CaseExpr, EI, EE,
+                                                      CI.apsInt))
+              Diag(CI.CaseExpr->getExprLoc(), diag::warn_not_in_enum)
+                << CI.CondTypeBeforePromotion;
+        }
       }
     }
   }
+#endif
 
-  // FIXME: If the case list was broken is some way, we don't have a good system
-  // to patch it up.  Instead, just return the whole substmt as broken.
-  if (CaseListIsErroneous)
-    return StmtError();
-
-  return MatchStmt::Create(Context, MatchLoc, InitStmt, Cond.get().first, CondExpr, LParenLoc, RParenLoc, Cases);
+  return MatchStmt::Create(Context, MatchLoc, LParenLoc, Exprs, RParenLoc, Cases);
 }
 
 void

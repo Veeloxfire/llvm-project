@@ -25,6 +25,7 @@ def SwitchCase : StmtNode<Stmt, 1>;
 def CaseStmt : StmtNode<SwitchCase>;
 def DefaultStmt : StmtNode<SwitchCase>;
 def MatchCaseStmt : StmtNode<Stmt>;
+def MatchDefaultStmt : StmtNode<Stmt>;
 def CapturedStmt : StmtNode<Stmt>;
 
 // Statements that might produce a value (for example, as the last non-null

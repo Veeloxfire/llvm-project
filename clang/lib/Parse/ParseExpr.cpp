@@ -257,12 +257,73 @@ ExprResult Parser::ParseCaseExpression(SourceLocation CaseLoc) {
   return Actions.ActOnCaseExpr(CaseLoc, Res);
 }
 
-ExprResult Parser::ParseMatchCaseExpression() {
+bool Parser::ParseMatchCaseExpressions(SmallVectorImpl<Stmt *> &Exprs) {
   EnterExpressionEvaluationContext ConstantEvaluated(
       Actions, Sema::ExpressionEvaluationContext::ConstantEvaluated);
-  ExprResult LHS(ParseCastExpression(AnyCastExpr, false, NotTypeCast));
-  ExprResult Res(ParseRHSOfBinaryExpression(LHS, prec::Conditional));
-  return Actions.ActOnMatchCaseExpr(Res);
+  bool SawError = false;
+  while (true) {
+    if (Tok.is(tok::kw_default)) {
+      SourceLocation DefaultLoc = ConsumeToken();
+      StmtResult S = Actions.ActOnMatchDefaultStmt(DefaultLoc);
+      if (S.isInvalid()) {
+        SawError = true;
+        SkipUntil(tok::comma, tok::colon, StopBeforeMatch);
+      }
+      else {
+        Exprs.push_back(S.get());
+      }
+    }
+    else {
+      ExprResult Expr = ParseAssignmentExpression();
+      Expr = Actions.CorrectDelayedTyposInExpr(Expr);
+
+      if (Tok.is(tok::ellipsis))
+        Expr = Actions.ActOnPackExpansion(Expr.get(), ConsumeToken());
+      else if (Tok.is(tok::code_completion)) {
+        // There's nothing to suggest in here as we parsed a full expression.
+        // Instead fail and propagate the error since caller might have something
+        // the suggest, e.g. signature help in function call. Note that this is
+        // performed before pushing the \p Expr, so that signature help can report
+        // current argument correctly.
+        SawError = true;
+        cutOffParsing();
+        break;
+      }
+
+      if (Expr.isInvalid()) {
+        SawError = true;
+        SkipUntil(tok::comma, tok::colon, StopBeforeMatch);
+      } else {
+        Exprs.push_back(Expr.get());
+      }
+    }
+
+    if (Tok.isNot(tok::comma) && Tok.isNot(tok::colon)) {
+      SawError = true;
+      SkipUntil(tok::comma, tok::colon, StopBeforeMatch);
+    }
+
+    if (Tok.is(tok::colon))
+      break;
+
+    assert(Tok.is(tok::comma) && "If not colon must be comma");
+    ConsumeToken();
+  }
+
+  if (SawError) {
+    // Ensure typos get diagnosed when errors were encountered while parsing the
+    // expression list.
+    for (auto &EorD : Exprs) {
+      if (Expr* E = dyn_cast<Expr>(EorD)) {
+        ExprResult Expr = Actions.CorrectDelayedTyposInExpr(E);
+        if (Expr.isUsable()) E = Expr.get();
+      }
+    }
+
+    return true;
+  }
+  else
+    return Actions.ActOnMatchCaseExprs(Exprs);
 }
 
 /// Parse a constraint-expression.

@@ -1387,13 +1387,20 @@ public:
                                       /*CurScope=*/nullptr);
   }
 
-
   /// Attach the body to a new match case statement.
   ///
   /// By default, performs semantic analysis to build the new statement.
   /// Subclasses may override this routine to provide different behavior.
-  StmtResult RebuildMatchCaseStmt(ArrayRef<Stmt *> Exprs, Stmt *SubStmt) {
-    return getSema().ActOnMatchCaseStmt(Exprs, SubStmt);
+  StmtResult RebuildMatchCaseStmt(ArrayRef<Stmt *> Exprs, unsigned ExprPerCase, Stmt *SubStmt) {
+    return getSema().ActOnMatchCaseStmt(Exprs, ExprPerCase, SubStmt);
+  }
+
+  /// Attach the body to a new match default statement.
+  ///
+  /// By default, performs semantic analysis to build the new statement.
+  /// Subclasses may override this routine to provide different behavior.
+  StmtResult RebuildMatchDefaultStmt(SourceLocation KeywordLoc) {
+    return SemaRef.ActOnMatchDefaultStmt(KeywordLoc);
   }
 
   /// Build a new label statement.
@@ -1455,10 +1462,9 @@ public:
   /// By default, performs semantic analysis to build the new statement.
   /// Subclasses may override this routine to provide different behavior.
   StmtResult RebuildMatchStmt(SourceLocation MatchLoc,
-                              SourceLocation LParenLoc, Stmt *Init,
-                              Sema::ConditionResult Cond,
+                              SourceLocation LParenLoc, ArrayRef<Expr *> Exprs,
                               SourceLocation RParenLoc, ArrayRef<Stmt *> Cases) {
-    return getSema().ActOnFinishMatchStmt(MatchLoc, LParenLoc, Init, Cond, RParenLoc, Cases);
+    return getSema().ActOnFinishMatchStmt(MatchLoc, LParenLoc, Exprs, RParenLoc, Cases);
   }
 
   /// Build a new while statement.
@@ -7853,21 +7859,40 @@ TreeTransform<Derived>::TransformCaseStmt(CaseStmt *S) {
 
 template<typename Derived>
 StmtResult
+TreeTransform<Derived>::TransformMatchDefaultStmt(MatchDefaultStmt *S) {
+  return getDerived().RebuildMatchDefaultStmt(S->getDefaultLoc());
+}
+
+template<typename Derived>
+StmtResult
 TreeTransform<Derived>::TransformMatchCaseStmt(MatchCaseStmt *S) {
+  unsigned ExprPerCase = S->getExprPerCase();
 
   SmallVector<Stmt *, 8> Exprs;
-  for(Stmt* C: S->getExprs()) {
-    Expr *CaseExpr = cast<Expr>(C);
-    EnterExpressionEvaluationContext Unevaluated(
-        SemaRef, Sema::ExpressionEvaluationContext::ConstantEvaluated);
+  for(auto CH: S->getChunkedExprs()) {
+    for(Stmt *C: CH) {
+      if (MatchDefaultStmt* Default = dyn_cast<MatchDefaultStmt>(C)) {
+        StmtResult R = getDerived().TransformMatchDefaultStmt(Default);
+        if(R.isInvalid())
+          return StmtError();
+        Exprs.push_back(R.get());
+      }
+      else {
+        Expr *CaseExpr = cast<Expr>(C);
+        EnterExpressionEvaluationContext Unevaluated(
+            SemaRef, Sema::ExpressionEvaluationContext::ConstantEvaluated);
 
-    // Transform the left-hand case value.
-    ExprResult LHS = getDerived().TransformExpr(CaseExpr);
-    LHS = SemaRef.ActOnMatchCaseExpr(LHS);
-    if (LHS.isInvalid())
+        // Transform the left-hand case value.
+        ExprResult LHS = getDerived().TransformExpr(cast<Expr>(CaseExpr));
+        if (LHS.isInvalid())
+          return StmtError();
+
+        Exprs.push_back(LHS.get());
+      }
+    }
+
+    if(SemaRef.ActOnMatchCaseExprs(MutableArrayRef(Exprs).take_back(ExprPerCase)))
       return StmtError();
-
-    Exprs.push_back(LHS.get());
   }
 
   // Transform the statement following the case
@@ -7877,7 +7902,7 @@ TreeTransform<Derived>::TransformMatchCaseStmt(MatchCaseStmt *S) {
     return StmtError();
 
   // Attach the body to the case statement
-  return getDerived().RebuildMatchCaseStmt(ArrayRef(Exprs), SubStmt.get());
+  return getDerived().RebuildMatchCaseStmt(ArrayRef(Exprs), ExprPerCase, SubStmt.get());
 }
 
 template <typename Derived>
@@ -8091,19 +8116,19 @@ TreeTransform<Derived>::TransformSwitchStmt(SwitchStmt *S) {
 template<typename Derived>
 StmtResult
 TreeTransform<Derived>::TransformMatchStmt(MatchStmt *S) {
-  // Transform the initialization statement
-  StmtResult Init = getDerived().TransformStmt(S->getInit());
-  if (Init.isInvalid())
-    return StmtError();
 
-  // Transform the condition.
-  Sema::ConditionResult Cond = getDerived().TransformCondition(
-      S->getMatchLoc(), S->getConditionVariable(), S->getCond(),
-      Sema::ConditionKind::Switch);
-  if (Cond.isInvalid())
-    return StmtError();
+  SmallVector<Expr *, 8> Exprs;
+  for(Stmt *C: S->getConds()) {
+    // Transform the condition.
+    ExprResult Cond = getDerived().TransformExpr(cast<Expr>(C));
+    if (Cond.isInvalid())
+      return StmtError();
 
-  Cond = SemaRef.ActOnStartOfMatchStmt(Cond);
+    Exprs.push_back(Cond.get());
+  }
+
+  if(SemaRef.ActOnStartOfMatchStmt(S->getMatchLoc(), Exprs))
+    return StmtError();
 
   llvm::SmallVector<Stmt *, 8> Cases;
 
@@ -8119,7 +8144,7 @@ TreeTransform<Derived>::TransformMatchStmt(MatchStmt *S) {
   }
 
   // Complete the switch statement.
-  return getDerived().RebuildMatchStmt(S->getMatchLoc(), S->getLParenLoc(), Init.get(), Cond, S->getRParenLoc(), ArrayRef(Cases));
+  return getDerived().RebuildMatchStmt(S->getMatchLoc(), S->getLParenLoc(), Exprs, S->getRParenLoc(), Cases);
 }
 
 template<typename Derived>

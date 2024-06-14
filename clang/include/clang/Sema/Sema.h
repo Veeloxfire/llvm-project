@@ -8451,13 +8451,15 @@ public:
   sema::CompoundScopeInfo &getCurCompoundScope() const;
 
   ExprResult ActOnCaseExpr(SourceLocation CaseLoc, ExprResult Val);
-  ExprResult ActOnMatchCaseExpr(ExprResult Val);
+  bool ActOnMatchCaseExprs(MutableArrayRef<Stmt *> Vals);
   StmtResult ActOnCaseStmt(SourceLocation CaseLoc, ExprResult LHS,
                            SourceLocation DotDotDotLoc, ExprResult RHS,
                            SourceLocation ColonLoc);
+  StmtResult ActOnMatchDefaultStmt(SourceLocation DefaultLoc);
+
   void ActOnCaseStmtBody(Stmt *CaseStmt, Stmt *SubStmt);
 
-  StmtResult ActOnMatchCaseStmt(ArrayRef<Stmt *> Exprs, Stmt *SubStmt);
+  StmtResult ActOnMatchCaseStmt(ArrayRef<Stmt *> Exprs, unsigned ExprPerCase, Stmt *SubStmt);
 
   StmtResult ActOnDefaultStmt(SourceLocation DefaultLoc,
                               SourceLocation ColonLoc, Stmt *SubStmt,
@@ -8494,10 +8496,9 @@ public:
   StmtResult ActOnFinishSwitchStmt(SourceLocation SwitchLoc, Stmt *Switch,
                                    Stmt *Body);
 
-  ConditionResult ActOnStartOfMatchStmt(ConditionResult Cond);
+  bool ActOnStartOfMatchStmt(SourceLocation MatcLoc, ArrayRef<Expr *> Exprs);
   StmtResult ActOnFinishMatchStmt(SourceLocation MatchLoc,
-                                  SourceLocation LParenLoc, Stmt *InitStmt,
-                                  ConditionResult Cond,
+                                  SourceLocation LParenLoc, ArrayRef<Expr *> Exprs,
                                   SourceLocation RParenLoc,
                                   ArrayRef<Stmt *> Cases);
 

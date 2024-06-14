@@ -3550,9 +3550,6 @@ public:
   void EmitContinueStmt(const ContinueStmt &S);
   void EmitSwitchStmt(const SwitchStmt &S);
   void EmitMatchStmt(const MatchStmt &S);
-  void EmitMatchCaseStmt(const MatchCaseStmt &S,
-                         llvm::SwitchInst& MatchInsn,
-                         JumpDest ExitDest);
   void EmitDefaultStmt(const DefaultStmt &S, ArrayRef<const Attr *> Attrs);
   void EmitCaseStmt(const CaseStmt &S, ArrayRef<const Attr *> Attrs);
   void EmitCaseStmtRange(const CaseStmt &S, ArrayRef<const Attr *> Attrs);

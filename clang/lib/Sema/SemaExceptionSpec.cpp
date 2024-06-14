@@ -1443,6 +1443,7 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
   case Stmt::IndirectGotoStmtClass:
   case Stmt::LabelStmtClass:
   case Stmt::MatchCaseStmtClass:
+  case Stmt::MatchDefaultStmtClass:
   case Stmt::MatchStmtClass:
   case Stmt::MSAsmStmtClass:
   case Stmt::MSDependentExistsStmtClass:

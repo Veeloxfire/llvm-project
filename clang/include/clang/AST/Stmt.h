@@ -30,6 +30,7 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/BitmaskEnum.h"
+#include "llvm/ADT/Chunked.h"
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator.h"
@@ -235,14 +236,6 @@ protected:
     LLVM_PREFERRED_TYPE(MatchBitfields)
     unsigned : NumStmtBits;
 
-    /// True if the MatchStmt has storage for an init statement.
-    LLVM_PREFERRED_TYPE(bool)
-    unsigned HasInit : 1;
-
-    /// True if the MatchStmt has storage for a condition variable.
-    LLVM_PREFERRED_TYPE(bool)
-    unsigned HasVar : 1;
-
     /// The location of the "match".
     SourceLocation MatchLoc;
   };
@@ -344,13 +337,22 @@ protected:
   };
 
   class MatchCaseBitfields {
-    friend class MatchCase;
     friend class MatchCaseStmt;
 
     LLVM_PREFERRED_TYPE(StmtBitfields)
     unsigned : NumStmtBits;
 
-    /// The location of the "case" or "default" keyword.
+    /// The location of the "case" keyword.
+    SourceLocation KeywordLoc;
+  };
+
+  class MatchDefaultfields {
+    friend class MatchDefaultStmt;
+
+    LLVM_PREFERRED_TYPE(StmtBitfields)
+    unsigned : NumStmtBits;
+
+    /// The location of the "default" keyword.
     SourceLocation KeywordLoc;
   };
 
@@ -1243,6 +1245,7 @@ protected:
     ReturnStmtBitfields ReturnStmtBits;
     SwitchCaseBitfields SwitchCaseBits;
     MatchCaseBitfields MatchCaseBits;
+    MatchDefaultfields MatchDefaultBits;
 
     // Expressions
     ExprBitfields ExprBits;
@@ -1781,45 +1784,108 @@ public:
   }
 };
 
+class MatchDefaultStmt final : public Stmt {
+  MatchDefaultStmt(SourceLocation DefaultLoc) : Stmt(MatchDefaultStmtClass) {
+    setDefaultLoc(DefaultLoc);
+  }
+  
+  explicit MatchDefaultStmt(EmptyShell Empty)
+    : Stmt(MatchDefaultStmtClass, Empty) {}
+
+public:
+  static MatchDefaultStmt *Create(const ASTContext &Ctx, SourceLocation DefaultLoc);
+  static MatchDefaultStmt *CreateEmpty(const ASTContext &Ctx);
+
+  void setDefaultLoc(SourceLocation DefaultLoc) {
+    MatchDefaultBits.KeywordLoc = DefaultLoc;
+  }
+
+  SourceLocation getDefaultLoc() const {
+    return MatchDefaultBits.KeywordLoc;
+  }
+
+
+  SourceLocation getBeginLoc() const {
+    return MatchDefaultBits.KeywordLoc;
+  }
+  SourceLocation getEndLoc() const LLVM_READONLY {
+    return MatchDefaultBits.KeywordLoc;
+  }
+
+  // Iterators
+  child_range children() {
+    return child_range(StmtIterator(), StmtIterator());
+  }
+
+  const_child_range children() const {
+    return child_range(StmtIterator(), StmtIterator());
+  }
+
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == MatchDefaultStmtClass;
+  }
+};
+
 class MatchCaseStmt final : 
     public Stmt,
     private llvm::TrailingObjects<MatchCaseStmt, Stmt *> {
   friend TrailingObjects;
 
-  unsigned NumExprs;
+  unsigned NumCases;
+  unsigned ExprPerCase;
 
   enum { SubStmtOffsetFromExprEnd = 0, SubStmtCount = 1 };
 
-  size_t numTrailingObjects(OverloadToken<Stmt *>) const {
-    return NumExprs + SubStmtCount;
+  unsigned totalExprs() const {
+    return ExprPerCase * NumCases;
   }
 
-  size_t subStmtOffset() const { return NumExprs + SubStmtOffsetFromExprEnd; }
+  size_t numTrailingObjects(OverloadToken<Stmt *>) const {
+    return totalExprs() + SubStmtCount;
+  }
+
+  size_t subStmtOffset() const { return totalExprs() + SubStmtOffsetFromExprEnd; }
 
   /// Build a match case statement assuming that the storage for the
   /// trailing objects has been properly allocated.
-  MatchCaseStmt(ArrayRef<Stmt *> CaseExprs, Stmt *SubStmt);
+  MatchCaseStmt(ArrayRef<Stmt *> CaseExprs, unsigned ExprPerCase, Stmt *SubStmt);
   
-  explicit MatchCaseStmt(EmptyShell Empty, unsigned NumExprs)
-    : Stmt(MatchCaseStmtClass, Empty), NumExprs(NumExprs) {}
+  explicit MatchCaseStmt(EmptyShell Empty, unsigned NumCases, unsigned ExprPerCase)
+    : Stmt(MatchCaseStmtClass, Empty), NumCases(NumCases), ExprPerCase(ExprPerCase) {}
 
 public:
   /// Build a match case statement.
   static MatchCaseStmt *Create(const ASTContext &Ctx,
-                               ArrayRef<Stmt *> CaseExprs, Stmt *SubStmt);
+                               ArrayRef<Stmt *> CaseExprs, unsigned ExprPerCase, Stmt *SubStmt);
 
   /// Build a empty match case statement.
   static MatchCaseStmt *CreateEmpty(const ASTContext &Ctx,
-                                    unsigned NumExprs);
+                                    unsigned NumCases, unsigned ExprPerCase);
 
-  ArrayRef<Stmt *> getExprs() const {
+  unsigned getExprPerCase() const {
+    return ExprPerCase;
+  }
+  unsigned getNumCases() const {
+    return NumCases;
+  }
+  
+  ArrayRef<Stmt *> getAllExprs() const {
     return ArrayRef(getTrailingObjects<Stmt *>(),
-                    NumExprs);
+                    totalExprs());
   }
 
-  MutableArrayRef<Stmt *> getExprs() {
+  MutableArrayRef<Stmt *> getAllExprs() {
     return MutableArrayRef(getTrailingObjects<Stmt *>(),
-                           NumExprs);
+                           totalExprs());
+  }
+
+  ChunkedMutableArrayRef<Stmt *> getChunkedExprs() {
+    return ChunkedMutableArrayRef<Stmt *>(getTrailingObjects<Stmt *>(),
+                                NumCases * ExprPerCase, ExprPerCase);
+  }
+  ChunkedArrayRef<Stmt *> getChunkedExprs() const {
+    return ChunkedArrayRef<Stmt *>(getTrailingObjects<Stmt *>(),
+                                NumCases * ExprPerCase, ExprPerCase);
   }
 
   Stmt *getSubStmt() { return getTrailingObjects<Stmt *>()[subStmtOffset()]; }
@@ -1831,8 +1897,8 @@ public:
     getTrailingObjects<Stmt *>()[subStmtOffset()] = S;
   }
 
-  SourceLocation getBeginLoc() const { 
-    return getExprs()[0]->getBeginLoc();
+  SourceLocation getBeginLoc() const {
+    return getTrailingObjects<Stmt *>()[0]->getBeginLoc();
   }
   SourceLocation getEndLoc() const LLVM_READONLY {
     return getSubStmt()->getEndLoc();
@@ -2691,130 +2757,43 @@ class MatchStmt final : public Stmt,
   friend TrailingObjects;
 
   // MatchStmt is followed by several trailing objects,
-  // some of which optional. Note that it would be more convenient to
-  // put the optional trailing objects at the end but this would change
-  // the order in children().
-  // The trailing objects are in order:
   //
-  // * A "Stmt *" for the init statement.
-  //    Present if and only if hasInitStorage().
-  //
-  // * A "Stmt *" for the condition variable.
-  //    Present if and only if hasVarStorage(). This is in fact a "DeclStmt *".
-  //
-  // * A "Stmt *" for the condition.
-  //    Always present. This is in fact an "Expr *".
+  // * NumExprs x "Stmt *" for the condition.
+  //    Always at least 1 present. Each is in fact an "Expr *".
   //
   // * NumCases x "Stmt *" for the cases
-  // Always at least 1 present. Each are in fact "MatchCaseStmt *"
-  enum { InitOffset = 0, CasesOffsetFromCond = 1 };
-  enum { NumMandatoryStmtPtr = 1 };
+  //    Always at least 1 present. Each are in fact "MatchCaseStmt *"
   SourceLocation LParenLoc;
   SourceLocation RParenLoc;
 
+  unsigned NumExprs;
   unsigned NumCases;
 
   unsigned numTrailingObjects(OverloadToken<Stmt *>) const {
-    return NumMandatoryStmtPtr + hasInitStorage() + hasVarStorage() + NumCases;
+    return NumExprs + NumCases;
   }
 
-  unsigned initOffset() const { return InitOffset; }
-  unsigned varOffset() const { return InitOffset + hasInitStorage(); }
-  unsigned condOffset() const {
-    return InitOffset + hasInitStorage() + hasVarStorage();
-  }
-  unsigned casesOffset() const { return condOffset() + CasesOffsetFromCond; }
+  unsigned exprsOffset() const { return 0; }
+  unsigned casesOffset() const { return NumExprs; }
 
   /// Build a match statement.
-  MatchStmt(const ASTContext &Ctx, SourceLocation MatchLoc, 
-            Stmt *Init, VarDecl *Var, Expr *Cond,
-            SourceLocation LParenLoc, SourceLocation RParenLoc, ArrayRef<Stmt *> Cases);
+  MatchStmt(SourceLocation MatchLoc, 
+            SourceLocation LParenLoc, ArrayRef<Expr *> Exprs,
+            SourceLocation RParenLoc, ArrayRef<Stmt *> Cases);
 
   /// Build a empty match statement.
-  explicit MatchStmt(EmptyShell Empty, bool HasInit, bool HasVar, unsigned NumCases);
+  explicit MatchStmt(EmptyShell Empty, unsigned NumExprs, unsigned NumCases);
 
 public:
   /// Create a match statement.
-  static MatchStmt *Create(const ASTContext &Ctx, SourceLocation MatchLoc,
-                           Stmt *Init, VarDecl *Var, Expr *Cond,
-                           SourceLocation LParenLoc, SourceLocation RParenLoc,
-                           ArrayRef<Stmt *> Cases);
+  static MatchStmt *Create(const ASTContext &Ctx, SourceLocation MatchLoc, 
+                           SourceLocation LParenLoc, ArrayRef<Expr *> Exprs,
+                           SourceLocation RParenLoc, ArrayRef<Stmt *> Cases);
 
   /// Create an empty match statement optionally with storage for
   /// an init expression and a condition variable.
-  static MatchStmt *CreateEmpty(const ASTContext &Ctx, bool HasInit,
-                                bool HasVar, unsigned NumCases);
-
-  /// True if this MatchStmt has storage for an init statement.
-  bool hasInitStorage() const { return MatchStmtBits.HasInit; }
-
-  /// True if this MatchStmt has storage for a condition variable.
-  bool hasVarStorage() const { return MatchStmtBits.HasVar; }
-
-  Expr *getCond() {
-    return reinterpret_cast<Expr *>(getTrailingObjects<Stmt *>()[condOffset()]);
-  }
-
-  const Expr *getCond() const {
-    return reinterpret_cast<Expr *>(getTrailingObjects<Stmt *>()[condOffset()]);
-  }
-
-  void setCond(Expr *Cond) {
-    getTrailingObjects<Stmt *>()[condOffset()] = reinterpret_cast<Stmt *>(Cond);
-  }
-
-  Stmt *getInit() {
-    return hasInitStorage() ? getTrailingObjects<Stmt *>()[initOffset()]
-                            : nullptr;
-  }
-
-  const Stmt *getInit() const {
-    return hasInitStorage() ? getTrailingObjects<Stmt *>()[initOffset()]
-                            : nullptr;
-  }
-
-  void setInit(Stmt *Init) {
-    assert(hasInitStorage() &&
-           "This match statement has no storage for an init statement!");
-    getTrailingObjects<Stmt *>()[initOffset()] = Init;
-  }
-
-  /// Retrieve the variable declared in this "match" statement, if any.
-  ///
-  /// In the following example, "x" is the condition variable.
-  /// \code
-  /// match (int x = foo()) {
-  ///   case 0: { /* ... */ }
-  ///   // ...
-  /// }
-  /// \endcode
-  VarDecl *getConditionVariable();
-  const VarDecl *getConditionVariable() const {
-    return const_cast<MatchStmt *>(this)->getConditionVariable();
-  }
-
-  /// Set the condition variable in this match statement.
-  /// The match statement must have storage for it.
-  void setConditionVariable(const ASTContext &Ctx, VarDecl *VD);
-
-  /// If this MatchStmt has a condition variable, return the faux DeclStmt
-  /// associated with the creation of that condition variable.
-  DeclStmt *getConditionVariableDeclStmt() {
-    return hasVarStorage() ? static_cast<DeclStmt *>(
-                                 getTrailingObjects<Stmt *>()[varOffset()])
-                           : nullptr;
-  }
-
-  const DeclStmt *getConditionVariableDeclStmt() const {
-    return hasVarStorage() ? static_cast<DeclStmt *>(
-                                 getTrailingObjects<Stmt *>()[varOffset()])
-                           : nullptr;
-  }
-
-  void setConditionVariableDeclStmt(DeclStmt *CondVar) {
-    assert(hasVarStorage());
-    getTrailingObjects<Stmt *>()[varOffset()] = CondVar;
-  }
+  static MatchStmt *CreateEmpty(const ASTContext &Ctx,
+                                unsigned NumExprs, unsigned NumCases);
 
   SourceLocation getMatchLoc() const { return MatchStmtBits.MatchLoc; }
   void setMatchLoc(SourceLocation L) { MatchStmtBits.MatchLoc = L; }
@@ -2822,13 +2801,19 @@ public:
   void setLParenLoc(SourceLocation Loc) { LParenLoc = Loc; }
   SourceLocation getRParenLoc() const { return RParenLoc; }
   void setRParenLoc(SourceLocation Loc) { RParenLoc = Loc; }
-
-  ArrayRef<Stmt *> getMatchCases() const {
-    return ArrayRef(getTrailingObjects<Stmt *>() + casesOffset(), NumCases);
+  
+  MutableArrayRef<Stmt *> getConds() {
+    return MutableArrayRef(getTrailingObjects<Stmt *>() + exprsOffset(), NumExprs);
+  }
+  ArrayRef<Stmt *> getConds() const {
+    return ArrayRef(getTrailingObjects<Stmt *>() + exprsOffset(), NumExprs);
   }
 
   MutableArrayRef<Stmt *> getMatchCases() {
     return MutableArrayRef(getTrailingObjects<Stmt *>() + casesOffset(), NumCases);
+  }
+  ArrayRef<Stmt *> getMatchCases() const {
+    return ArrayRef(getTrailingObjects<Stmt *>() + casesOffset(), NumCases);
   }
 
   SourceLocation getBeginLoc() const { return getMatchLoc(); }

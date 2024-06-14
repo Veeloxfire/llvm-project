@@ -1804,7 +1804,7 @@ StmtResult Parser::ParseSwitchStatement(SourceLocation *TrailingElseLoc) {
 
 /// ParseMatchStatement
 ///       match-statement:
-///        'match' '(' condition ')' '{' match-case-list '}'
+///        'match' '(' expression-list ')' '{' match-case-list '}'
 ///       
 ///       match-case-list:
 ///         match-case-statment match-case-list[opt]
@@ -1821,16 +1821,24 @@ StmtResult Parser::ParseMatchStatement() {
 
   assert(getLangOpts().CPlusPlus && "Only a c++");
 
-  // Parse the condition.
-  StmtResult InitStmt;
-  Sema::ConditionResult Cond;
-  SourceLocation LParen;
-  SourceLocation RParen;
-  if (ParseParenExprOrCondition(&InitStmt, Cond, MatchLoc,
-                                Sema::ConditionKind::Switch, LParen, RParen))
+  // Parse the exprs.
+
+  BalancedDelimiterTracker ExprT(*this, tok::l_paren);
+  if(ExprT.consumeOpen())
     return StmtError();
 
-  Cond = Actions.ActOnStartOfMatchStmt(Cond);
+  SmallVector<Expr *, 8> Exprs;
+  if (ParseSimpleExpressionList(Exprs))
+    return StmtError();
+
+  if(ExprT.consumeClose())
+    return StmtError();
+
+  SourceLocation LParen = ExprT.getOpenLocation();
+  SourceLocation RParen = ExprT.getCloseLocation();
+
+  if(Actions.ActOnStartOfMatchStmt(MatchLoc, Exprs))
+    return StmtError();
 
   StmtVector Stmts;
   {
@@ -1851,7 +1859,7 @@ StmtResult Parser::ParseMatchStatement() {
         return StmtError(); 
       }
 
-      StmtResult R = ParseMatchCaseStatement();
+      StmtResult R = ParseMatchCaseStatement(Exprs.size());
       if(R.isUsable())
         Stmts.push_back(R.get());
     }
@@ -1860,7 +1868,7 @@ StmtResult Parser::ParseMatchStatement() {
       return StmtError();
   }
 
-  return Actions.ActOnFinishMatchStmt(MatchLoc, LParen, InitStmt.get(), Cond, RParen, ArrayRef(Stmts));
+  return Actions.ActOnFinishMatchStmt(MatchLoc, LParen, ArrayRef(Exprs), RParen, ArrayRef(Stmts));
 }
 
 /// ParseMatchCaseStatement
@@ -1868,15 +1876,14 @@ StmtResult Parser::ParseMatchStatement() {
 ///        match-case-expressions statement
 ///       
 ///       match-case-expressions:
-///         'case' expression ':' match-case-expressions[opt]
+///         'case' expression-list ':' match-case-expressions[opt]
 ///
-StmtResult Parser::ParseMatchCaseStatement() {
+StmtResult Parser::ParseMatchCaseStatement(unsigned ExprCount) {
   assert(Tok.is(tok::kw_case) && "Not a case stmt!");
 
   StmtVector Cases;
   do {
     SourceLocation CaseLoc = ConsumeToken();
-    SourceLocation ColonLoc = SourceLocation();
 
     if (Tok.is(tok::code_completion)) {
       cutOffParsing();
@@ -1889,8 +1896,8 @@ StmtResult Parser::ParseMatchCaseStatement() {
     /// expression.
     ColonProtectionRAIIObject ColonProtection(*this);
 
-    ExprResult LHS = ParseCaseExpression(CaseLoc);
-    if (LHS.isInvalid()) {
+    StmtVector Exprs;
+    if (ParseMatchCaseExpressions(Exprs)) {
       // If constant-expression is parsed unsuccessfully, recover by skipping
       // current case statement (moving to the colon that ends it).
       if (!SkipUntil(tok::colon, tok::r_brace, StopAtSemi | StopBeforeMatch))
@@ -1899,6 +1906,7 @@ StmtResult Parser::ParseMatchCaseStatement() {
 
     ColonProtection.restore();
 
+    SourceLocation ColonLoc = SourceLocation();
     if (TryConsumeToken(tok::colon, ColonLoc)) {
     } else if (TryConsumeToken(tok::semi, ColonLoc) ||
                TryConsumeToken(tok::coloncolon, ColonLoc)) {
@@ -1914,8 +1922,12 @@ StmtResult Parser::ParseMatchCaseStatement() {
       ColonLoc = ExpectedLoc;
     }
 
-    Cases.push_back(LHS.get());
+    if(Exprs.size() != ExprCount) {
+      Diag(ColonLoc, diag::err_unmatched_match_count)
+        << Exprs.size() << ExprCount;
+    }
 
+    Cases.append(Exprs.begin(), Exprs.end());
   } while (Tok.is(tok::kw_case));
 
   // Expect we found a non-case statement, start by parsing it.
@@ -1929,7 +1941,7 @@ StmtResult Parser::ParseMatchCaseStatement() {
   StmtResult SubStmt = ParseStatement(/*TrailingElseLoc=*/nullptr);
 
   // Return the top level parsed statement tree.
-  return Actions.ActOnMatchCaseStmt(ArrayRef(Cases), SubStmt.get());;
+  return Actions.ActOnMatchCaseStmt(ArrayRef(Cases), ExprCount, SubStmt.get());
 }
 
 /// ParseWhileStatement

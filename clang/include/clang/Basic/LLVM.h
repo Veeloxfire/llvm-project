@@ -30,6 +30,8 @@ namespace llvm {
   class VersionTuple;
   template<typename T> class ArrayRef;
   template<typename T> class MutableArrayRef;
+  template<typename T> class ChunkedArrayRef;
+  template<typename T> class ChunkedMutableArrayRef;
   template<typename T> class OwningArrayRef;
   template<unsigned InternalLen> class SmallString;
   template<typename T, unsigned N> class SmallVector;
@@ -65,6 +67,8 @@ namespace clang {
   // ADT's.
   using llvm::ArrayRef;
   using llvm::MutableArrayRef;
+  using llvm::ChunkedArrayRef;
+  using llvm::ChunkedMutableArrayRef;
   using llvm::OwningArrayRef;
   using llvm::SaveAndRestore;
   using llvm::SmallString;

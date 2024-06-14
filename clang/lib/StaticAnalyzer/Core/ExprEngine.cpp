@@ -1850,6 +1850,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
     case Stmt::NoStmtClass:
     case Stmt::NullStmtClass:
     case Stmt::MatchCaseStmtClass:
+    case Stmt::MatchDefaultStmtClass:
     case Stmt::MatchStmtClass:
     case Stmt::SwitchStmtClass:
     case Stmt::WhileStmtClass:

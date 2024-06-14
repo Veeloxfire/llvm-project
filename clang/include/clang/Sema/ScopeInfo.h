@@ -209,7 +209,7 @@ public:
   SmallVector<SwitchInfo, 8> SwitchStack;
 
   /// MatchStack - The current set of active match statements
-  SmallVector<Expr *> MatchStack;
+  SmallVector<ArrayRef<Expr *>, 8> MatchStack;
 
   /// The list of return statements that occur within the function or
   /// block, if there is any chance of applying the named return value
